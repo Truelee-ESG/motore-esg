@@ -3,19 +3,22 @@ import json
 import base64
 import time
 import threading
+import queue
 import webbrowser
 import requests
 import pandas as pd
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, Response
 
 app = Flask(__name__)
 
 # ==========================================
 # 1. LOGICA DI RICERCA CARTELLE
 # ==========================================
-def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
+def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q):
     nome_file_config = f"config_{nome_cliente}.json"
     percorso_root = percorso_root.strip('"\'').strip()
+    
+    q.put(f"Avvio ricerca cartelle in corso dentro: {percorso_root}")
     
     config = {"ee": None, "gas": None, "api_key": api_key_inserita, "root": percorso_root}
     
@@ -25,6 +28,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
                 config_salvata = json.load(f)
                 if config_salvata.get("root") == percorso_root:
                     config = config_salvata
+                    q.put(f"Configurazione esistente caricata da {nome_file_config}")
         except Exception:
             pass
 
@@ -32,23 +36,28 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
         config['api_key'] = api_key_inserita
 
     if not config.get("ee") or not config.get("gas") or not os.path.exists(str(config.get("ee", ""))):
+        q.put("Scansione delle cartelle in corso (potrebbe richiedere qualche secondo)...")
         for root, dirs, files in os.walk(percorso_root):
             for directory in dirs:
                 nome_dir = directory.lower()
                 if "energia" in nome_dir or "elettric" in nome_dir or "e.e" in nome_dir or "luce" in nome_dir:
                     config["ee"] = os.path.join(root, directory)
+                    q.put(f"[Trovata] Cartella Energia Elettrica: {config['ee']}")
                 elif "gas" in nome_dir or "metano" in nome_dir or "gpl" in nome_dir:
                     config["gas"] = os.path.join(root, directory)
+                    q.put(f"[Trovata] Cartella Gas: {config['gas']}")
 
     with open(nome_file_config, 'w') as f:
         json.dump(config, f, indent=4)
         
+    q.put("Ricerca cartelle completata.")
     return config, f"Configurazione salvata in {nome_file_config}"
 
 # ==========================================
-# 2. LOGICA ESTRAZIONE TRAMITE REST API CON RETRY
+# 2. LOGICA ESTRAZIONE TRAMITE REST API
 # ==========================================
-def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
+def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, q):
+    q.put(f" -> Lettura file PDF: {os.path.basename(percorso_file)}")
     with open(percorso_file, "rb") as doc_file:
         pdf_bytes = doc_file.read()
     pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
@@ -64,6 +73,7 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
     ultimo_errore = None
     
     for modello in modelli:
+        q.put(f"    Invio a Google Gemini (Modello: {modello}) ...")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello}:generateContent?key={api_key}"
         payload = {
             "contents": [
@@ -94,19 +104,23 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
                 if response.status_code == 200:
                     data_risposta = response.json()
                     successo = True
+                    q.put(f"    [OK] Risposta ricevuta da {modello}.")
                     break
                 elif response.status_code in [503, 429]:
+                    q.put(f"    [Avviso] Server occupati (503/429). Tentativo {tentativo+1} di {tentativi}...")
                     time.sleep(3 * (tentativo + 1))
                     ultimo_errore = response.text
                     continue
                 else:
                     ultimo_errore = response.text
                     if "404" in str(response.status_code) or "NotFound" in response.text:
+                        q.put(f"    [Info] Modello {modello} non disponibile, provo il successivo...")
                         break
                     else:
                         raise Exception(f"HTTP {response.status_code}: {response.text}")
             except requests.exceptions.RequestException as e:
                 ultimo_errore = str(e)
+                q.put(f"    [Errore di rete] Riprovo... ({str(e)})")
                 time.sleep(2)
                 continue
                 
@@ -116,9 +130,9 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
                 testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
                 return json.loads(testo_pulito)
             except Exception as parse_err:
-                raise Exception(f"Errore nella decodifica JSON da Gemini: {str(parse_err)} - Risposta: {data_risposta}")
+                raise Exception(f"Errore nella decodifica JSON: {str(parse_err)}")
                 
-    raise Exception(f"Tutti i tentativi falliti sui modelli disponibili. Ultimo errore: {ultimo_errore}")
+    raise Exception(f"Tutti i tentativi falliti. Ultimo errore: {ultimo_errore}")
 
 def converti_in_kwh(dati):
     try:
@@ -184,83 +198,127 @@ def home():
 
 @app.route('/avvia', methods=['POST'])
 def avvia_processo():
-    try:
-        nome_cliente = request.form['nome_cliente'].strip()
-        percorso_root = request.form['percorso_root'].strip()
-        api_key_inserita = request.form['api_key'].strip()
-        
-        if not os.path.exists(percorso_root):
-            return f"<h3>Errore Percorso:</h3><p>La cartella specificata non esiste sul computer/server: <b>{percorso_root}</b></p><br><a href='/'>Riprova</a>", 400
+    nome_cliente = request.form['nome_cliente'].strip()
+    percorso_root = request.form['percorso_root'].strip()
+    api_key_inserita = request.form['api_key'].strip()
 
-        config, msg_ricerca = trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita)
-        chiave_attiva = config.get('api_key')
-        
-        if not chiave_attiva:
-            return "Errore: API Key mancante o non valida.", 400
+    q = queue.Queue()
 
-        dati_ee = []
-        dati_gas = []
+    def background_worker():
+        try:
+            if not os.path.exists(percorso_root):
+                q.put(f"ERRORE: La cartella specificata non esiste: {percorso_root}")
+                q.put(("DONE", None))
+                return
 
-        cartella_ee = config.get("ee")
-        if cartella_ee and os.path.exists(cartella_ee):
-            for f in os.listdir(cartella_ee):
-                if f.lower().endswith('.pdf'):
-                    percorso_pdf = os.path.join(cartella_ee, f)
-                    dati = estrai_dati_da_pdf(percorso_pdf, "energia elettrica", chiave_attiva)
-                    dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
-                    dati_ee.append(dati)
-                    
-        cartella_gas = config.get("gas")
-        if cartella_gas and os.path.exists(cartella_gas):
-            for f in os.listdir(cartella_gas):
-                if f.lower().endswith('.pdf'):
-                    percorso_pdf = os.path.join(cartella_gas, f)
-                    dati = estrai_dati_da_pdf(percorso_pdf, "gas", chiave_attiva)
-                    dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
-                    dati_gas.append(dati)
+            config, msg_ricerca = trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
+            chiave_attiva = config.get('api_key')
+            
+            if not chiave_attiva:
+                q.put("ERRORE: API Key mancante o non valida.")
+                q.put(("DONE", None))
+                return
 
-        if not cartella_ee and not cartella_gas:
-            return f"""
-            <div style="font-family: Arial; padding: 20px; max-width: 600px; margin: 0 auto;">
-                <h3 style="color: #d32f2f;">Cartelle non trovate</h3>
-                <p>Impossibile individuare automaticamente cartelle valide all'interno di:</p>
-                <p><b>{percorso_root}</b></p>
-                <br><a href="/">Torna alla home e verifica la struttura delle cartelle</a>
+            dati_ee = []
+            dati_gas = []
+
+            q.put("--- Inizio analisi bollette PDF ---")
+            
+            cartella_ee = config.get("ee")
+            if cartella_ee and os.path.exists(cartella_ee):
+                q.put(f"Scansione file PDF nella cartella Energia Elettrica: {cartella_ee}")
+                for f in os.listdir(cartella_ee):
+                    if f.lower().endswith('.pdf'):
+                        percorso_pdf = os.path.join(cartella_ee, f)
+                        dati = estrai_dati_da_pdf(percorso_pdf, "energia elettrica", chiave_attiva, q)
+                        dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
+                        dati_ee.append(dati)
+                        q.put(f"   [Completato] {f} -> Estratti kWh: {dati['consumo_kwh_convertito']}")
+                        
+            cartella_gas = config.get("gas")
+            if cartella_gas and os.path.exists(cartella_gas):
+                q.put(f"Scansione file PDF nella cartella Gas: {cartella_gas}")
+                for f in os.listdir(cartella_gas):
+                    if f.lower().endswith('.pdf'):
+                        percorso_pdf = os.path.join(cartella_gas, f)
+                        dati = estrai_dati_da_pdf(percorso_pdf, "gas", chiave_attiva, q)
+                        dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
+                        dati_gas.append(dati)
+                        q.put(f"   [Completato] {f} -> Estratti kWh: {dati['consumo_kwh_convertito']}")
+
+            if not cartella_ee and not cartella_gas:
+                q.put("ATTENZIONE: Nessuna cartella trovata.")
+                q.put(("DONE", None))
+                return
+
+            q.put("--- Generazione file Excel sul Desktop ---")
+            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+            nome_file_excel = os.path.join(desktop_path, f"Report_Consumi_{nome_cliente}.xlsx")
+
+            with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
+                if dati_ee:
+                    pd.DataFrame(dati_ee).to_excel(writer, sheet_name='Energia_Elettrica', index=False)
+                if dati_gas:
+                    pd.DataFrame(dati_gas).to_excel(writer, sheet_name='Gas', index=False)
+                if not dati_ee and not dati_gas:
+                    pd.DataFrame([{"Note": "Nessun file PDF trovato"}]).to_excel(writer, sheet_name='Vuoto', index=False)
+
+            q.put(f"SUCCESSO: File Excel salvato in: {nome_file_excel}")
+            q.put(("DONE", nome_file_excel))
+        except Exception as err:
+            import traceback
+            q.put(f"ERRORE CRITICO:\n{traceback.format_exc()}")
+            q.put(("DONE", None))
+
+    threading.Thread(target=background_worker).start()
+
+    def generate():
+        yield f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Elaborazione Consumi ESG</title>
+            <style>
+                body {{ font-family: Arial; padding: 40px; background: #f4f6f8; }}
+                .box {{ background: white; padding: 25px; border-radius: 8px; max-width: 750px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }}
+                #log-box {{ background: #1e1e1e; color: #00ff66; padding: 15px; border-radius: 5px; height: 350px; overflow-y: scroll; font-family: monospace; font-size: 0.9em; margin-top: 15px; white-space: pre-wrap; }}
+                h2 {{ color: #1a73e8; text-align: center; margin-top: 0; }}
+                .btn {{ display: inline-block; margin-top: 20px; background: #1a73e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold; }}
+                .btn:hover {{ background: #1557b0; }}
+            </style>
+            <script>
+                function appendLog(text) {{
+                    const box = document.getElementById('log-box');
+                    box.innerHTML += text + "\\n";
+                    box.scrollTop = box.scrollHeight;
+                }}
+            </script>
+        </head>
+        <body>
+            <div class="box">
+                <h2>Elaborazione Consumi ESG in Corso</h2>
+                <p>Segui l'avanzamento delle operazioni in tempo reale:</p>
+                <div id="log-box">Inizializzazione motore...</div>
+                <div id="result-area"></div>
             </div>
-            """, 400
-
-        # Salvataggio diretto sul Desktop del computer
-        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-        nome_file_excel = os.path.join(desktop_path, f"Report_Consumi_{nome_cliente}.xlsx")
-
-        with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
-            if dati_ee:
-                pd.DataFrame(dati_ee).to_excel(writer, sheet_name='Energia_Elettrica', index=False)
-            if dati_gas:
-                pd.DataFrame(dati_gas).to_excel(writer, sheet_name='Gas', index=False)
-            if not dati_ee and not dati_gas:
-                pd.DataFrame([{"Note": "Nessun file PDF trovato"}]).to_excel(writer, sheet_name='Vuoto', index=False)
-
-        return f"""
-        <div style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto; text-align: center;">
-            <h3 style="color: #2e7d32; font-size: 1.5em;">Processo Completato con Successo!</h3>
-            <p style="color: #555;">{msg_ricerca}</p>
-            <p style="color: #555;">Documenti analizzati e convertiti in kWh.</p>
-            <p style="font-size: 1.1em;">File Excel salvato direttamente sul tuo <b>Desktop</b>:<br><code>{nome_file_excel}</code></p>
-            <br>
-            <a href="/" style="background: #1a73e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Torna alla home</a>
-        </div>
+        </body>
+        </html>
         """
-    except Exception as err:
-        import traceback
-        dettagli_errore = traceback.format_exc()
-        return f"""
-        <div style="font-family: Arial; padding: 20px; max-width: 700px; margin: 0 auto; background: #fff3f3; border: 1px solid #ffcdd2; border-radius: 4px;">
-            <h3 style="color: #c62828;">Dettaglio Errore Tecnico:</h3>
-            <p style="font-family: monospace; background: #fff; padding: 10px; border: 1px solid #ddd; word-break: break-all; white-space: pre-wrap;">{dettagli_errore}</p>
-            <br><a href="/">Torna indietro</a>
-        </div>
-        """, 500
+        
+        while True:
+            item = q.get()
+            if isinstance(item, tuple) and item[0] == "DONE":
+                file_path = item[1]
+                if file_path:
+                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #2e7d32; text-align:center;\">Processo Completato con Successo!</h3><p style=\"text-align:center;\">File Excel salvato direttamente sul tuo Desktop:<br><b>{file_path}</b></p><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
+                else:
+                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #c62828; text-align:center;\">Processo terminato con errori.</h3><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
+                break
+            else:
+                safe_msg = str(item).replace('\\', '\\\\').replace("'", "\\'").replace('\n', '\\n')
+                yield f"<script>appendLog('{safe_msg}');</script>\n"
+
+    return Response(generate(), mimetype='text/html')
 
 if __name__ == '__main__':
     threading.Timer(1.0, lambda: webbrowser.open('http://127.0.0.1:5000')).start()
