@@ -15,31 +15,38 @@ app = Flask(__name__)
 def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
     nome_file_config = f"config_{nome_cliente}.json"
     
-    # Se la configurazione esiste già, la carichiamo (mantenendo anche la chiave salvata)
+    # Pulizia del percorso da spazi accidentali
+    percorso_root = percorso_root.strip('"\'')
+    
+    config = {"ee": None, "gas": None, "api_key": api_key_inserita}
+    
+    # Se esiste già una configurazione, la carichiamo
     if os.path.exists(nome_file_config):
-        with open(nome_file_config, 'r') as f:
-            config = json.load(f)
-            # Se l'utente ha inserito una nuova chiave, la aggiorniamo nel file
-            if api_key_inserita:
-                config['api_key'] = api_key_inserita
-                with open(nome_file_config, 'w') as fw:
-                    json.dump(config, fw, indent=4)
-            return config, f"Configurazione e credenziali caricate da {nome_file_config}"
+        try:
+            with open(nome_file_config, 'r') as f:
+                config = json.load(f)
+        except Exception:
+            pass
 
-    # Prima esecuzione: cerchiamo le cartelle e salviamo tutto
-    cartelle_trovate = {"ee": None, "gas": None, "api_key": api_key_inserita}
-    for root, dirs, files in os.walk(percorso_root):
-        for directory in dirs:
-            nome_dir = directory.lower()
-            if "energia" in nome_dir or "elettric" in nome_dir or "e.e" in nome_dir:
-                cartelle_trovate["ee"] = os.path.join(root, directory)
-            elif "gas" in nome_dir or "metano" in nome_dir:
-                cartelle_trovate["gas"] = os.path.join(root, directory)
+    # Aggiorniamo la chiave API se l'utente l'ha inserita ora
+    if api_key_inserita:
+        config['api_key'] = api_key_inserita
 
+    # Se mancano i percorsi delle cartelle, li cerchiamo
+    if not config.get("ee") or not config.get("gas") or not os.path.exists(config.get("ee", "")):
+        for root, dirs, files in os.walk(percorso_root):
+            for directory in dirs:
+                nome_dir = directory.lower()
+                if "energia" in nome_dir or "elettric" in nome_dir or "e.e" in nome_dir:
+                    config["ee"] = os.path.join(root, directory)
+                elif "gas" in nome_dir or "metano" in nome_dir:
+                    config["gas"] = os.path.join(root, directory)
+
+    # Salviamo tutto nel file di configurazione
     with open(nome_file_config, 'w') as f:
-        json.dump(cartelle_trovate, f, indent=4)
+        json.dump(config, f, indent=4)
         
-    return cartelle_trovate, f"Nuova scansione effettuata. Percorsi e chiave salvati in {nome_file_config}"
+    return config, f"Configurazione salvata in {nome_file_config}"
 
 # ==========================================
 # 2. LOGICA ESTRAZIONE E CONVERSIONE
@@ -107,7 +114,7 @@ HTML_PAGE = """
             <input type="text" name="percorso_root" placeholder="es. C:\\Archivio_Dati" required>
 
             <label>Google AI Studio API Key (Password):</label>
-            <input type="password" name="api_key" placeholder="Incolla qui la tua chiave API (richiesta la 1° volta)" required>
+            <input type="password" name="api_key" placeholder="Incolla qui la tua chiave API" required>
             
             <button type="submit">Avvia Ricerca ed Estrazione</button>
         </form>
@@ -122,17 +129,16 @@ def home():
 
 @app.route('/avvia', methods=['POST'])
 def avvia_processo():
-    nome_cliente = request.form['nome_cliente']
-    percorso_root = request.form['percorso_root']
-    api_key_inserita = request.form['api_key']
+    nome_cliente = request.form['nome_cliente'].strip()
+    percorso_root = request.form['percorso_root'].strip()
+    api_key_inserita = request.form['api_key'].strip()
     
     # 1. Recupera o memorizza percorsi e chiave
     config, msg_ricerca = trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita)
     
-    # Configura Gemini con la chiave associata a questa azienda
     chiave_attiva = config.get('api_key')
     if not chiave_attiva:
-        return "Errore: API Key mancante. Inserisci la chiave nella schermata precedente.", 400
+        return "Errore: API Key mancante o non valida.", 400
     
     genai.configure(api_key=chiave_attiva)
 
@@ -141,21 +147,26 @@ def avvia_processo():
 
     # 2. Estrazione dai PDF trovati
     try:
-        if config.get("ee") and os.path.exists(config["ee"]):
-            for f in os.listdir(config["ee"]):
+        cartella_ee = config.get("ee")
+        if cartella_ee and os.path.exists(cartella_ee):
+            for f in os.listdir(cartella_ee):
                 if f.lower().endswith('.pdf'):
-                    dati = estrai_dati_da_pdf(os.path.join(config["ee"], f), "energia elettrica")
+                    percorso_pdf = os.path.join(cartella_ee, f)
+                    dati = estrai_dati_da_pdf(percorso_pdf, "energia elettrica")
                     dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                     dati_ee.append(dati)
                     
-        if config.get("gas") and os.path.exists(config["gas"]):
-            for f in os.listdir(config["gas"]):
+        cartella_gas = config.get("gas")
+        if cartella_gas and os.path.exists(cartella_gas):
+            for f in os.listdir(cartella_gas):
                 if f.lower().endswith('.pdf'):
-                    dati = estrai_dati_da_pdf(os.path.join(config["gas"], f), "gas")
+                    percorso_pdf = os.path.join(cartella_gas, f)
+                    dati = estrai_dati_da_pdf(percorso_pdf, "gas")
                     dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                     dati_gas.append(dati)
+                    
     except Exception as e:
-        return f"Errore durante l'elaborazione con Gemini (verifica che la chiave API sia corretta): {str(e)}", 500
+        return f"<h3>Errore durante l'elaborazione con Gemini:</h3><p>{str(e)}</p><p>Verifica che la chiave API inserita sia corretta e attiva.</p>", 500
 
     # 3. Creazione del report Excel
     nome_file_excel = f"Report_Consumi_{nome_cliente}.xlsx"
@@ -165,7 +176,7 @@ def avvia_processo():
         if dati_gas:
             pd.DataFrame(dati_gas).to_excel(writer, sheet_name='Gas', index=False)
         if not dati_ee and not dati_gas:
-            pd.DataFrame([{"Note": "Nessun dato trovato"}]).to_excel(writer, sheet_name='Vuoto', index=False)
+            pd.DataFrame([{"Note": "Nessun file PDF trovato nelle cartelle rilevate"}]).to_excel(writer, sheet_name='Vuoto', index=False)
 
     return f"""
     <div style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto; text-align: center;">
