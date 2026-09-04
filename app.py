@@ -1,11 +1,10 @@
 import os
+import re
 import json
-import base64
 import time
 import threading
 import queue
 import webbrowser
-import requests
 import pandas as pd
 from pypdf import PdfReader
 from flask import Flask, request, render_template_string, Response
@@ -15,10 +14,10 @@ app = Flask(__name__)
 # ==========================================
 # 1. RICERCA CARTELLE
 # ==========================================
-def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q):
+def trova_e_memorizza_cartelle(percorso_root, nome_cliente, q):
     nome_file_config = f"config_{nome_cliente}.json"
     percorso_root = percorso_root.strip('"\'').strip()
-    config = {"ee": None, "gas": None, "api_key": api_key_inserita, "root": percorso_root}
+    config = {"ee": None, "gas": None, "root": percorso_root}
     
     if os.path.exists(nome_file_config):
         try:
@@ -29,11 +28,8 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
         except Exception:
             pass
 
-    if api_key_inserita:
-        config['api_key'] = api_key_inserita
-
     if not config.get("ee") or not config.get("gas") or not os.path.exists(str(config.get("ee", ""))):
-        q.put("Scansione delle cartelle in corso...")
+        q.put("Scansione delle cartelle in corso sul PC...")
         for root, dirs, files in os.walk(percorso_root):
             for directory in dirs:
                 nome_dir = directory.lower()
@@ -50,28 +46,12 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
     return config
 
 # ==========================================
-# 2. SELEZIONE MODELLO OTTIMIZZATO E LETTURA LOCALE
+# 2. MOTORE 100% LOCALE (REGEX)
 # ==========================================
-def trova_modello_valido(api_key, q):
-    q.put("Connessione a Google AI Studio per trovare il modello attivo...")
-    # Priorità ai nuovi modelli
-    modelli = ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.0-flash']
+def estrai_dati_locale(percorso_file, tipo_bolletta, q):
+    nome_file = os.path.basename(percorso_file)
+    q.put(f" -> Elaborazione istantanea: {nome_file}")
     
-    for m in modelli:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
-        payload = {"contents": [{"parts": [{"text": "test"}]}]}
-        try:
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=5)
-            if res.status_code != 404:
-                q.put(f"-> Modello ottimale agganciato con successo: {m}")
-                return m
-        except Exception:
-            continue
-            
-    q.put("-> Uso modello predefinito di riserva: gemini-3.6-flash")
-    return 'gemini-3.6-flash'
-
-def leggi_testo_pdf_locale(percorso_file):
     testo = ""
     try:
         reader = PdfReader(percorso_file)
@@ -79,156 +59,123 @@ def leggi_testo_pdf_locale(percorso_file):
             estratto = page.extract_text()
             if estratto:
                 testo += estratto + "\n"
-    except Exception:
-        pass
-    return testo
-
-def calcola_kwh(item):
-    try:
-        consumo = float(item.get('consumo', 0))
-    except (ValueError, TypeError):
-        consumo = 0.0
-    unita = str(item.get('unita_misura', '')).lower()
-    tipo_gas = str(item.get('tipo_gas', '')).lower()
-    if unita == 'kwh':
-        return consumo
-    fattore = 1.0
-    if 'metano' in tipo_gas and unita in ['sm3', 'm3']:
-        fattore = 10.5  
-    elif 'gpl' in tipo_gas and unita in ['litri', 'l']:
-        fattore = 7.0
-    return round(consumo * fattore, 2)
-
-# ==========================================
-# 3. MOTORE IBRIDO: TESTO IN BLOCCO + VISIVO SINGOLO
-# ==========================================
-def estrai_dati_intelligente(file_paths, tipo_bolletta, api_key, modello_attivo, q):
-    if not file_paths:
-        return []
+    except Exception as e:
+        q.put(f"   [Errore Lettura] Impossibile aprire il file.")
+        return None
         
-    dati_finali = []
-    bollette_testuali = []
-    bollette_immagini = []
-
-    q.put(f"\n--- FASE 1: Lettura ultrarapida dal tuo PC ({tipo_bolletta}) ---")
-    for p in file_paths:
-        nome_file = os.path.basename(p)
-        testo = leggi_testo_pdf_locale(p)
-        if len(testo.strip()) > 50:
-            bollette_testuali.append({"nome_file": nome_file, "testo": testo})
-            q.put(f"   [Testo Estratto] {nome_file}")
-        else:
-            bollette_immagini.append(p)
-            q.put(f"   [Scansione Visiva Richiesta] {nome_file}")
-
-    # A) ELABORAZIONE IN BLOCCO DEI TESTI (Utilizzando il modello dinamicamente rilevato)
-    if bollette_testuali:
-        q.put(f"--- FASE 2: Invio cumulativo leggero di {len(bollette_testuali)} file a Gemini ---")
-        prompt_testi = f"Analizza queste bollette di {tipo_bolletta}:\n\n"
-        for tb in bollette_testuali:
-            prompt_testi += f"--- INIZIO BOLLETTA {tb['nome_file']} ---\n{tb['testo']}\n--- FINE BOLLETTA {tb['nome_file']} ---\n\n"
-            
-        prompt_testi += """
-        Estrai i dati per OGNI SINGOLA bolletta e restituisci UN UNICO ARRAY JSON valido (senza markdown) con questa struttura per ogni elemento:
-        [
-          {"nome_file": "nome_file.pdf", "mese": "gennaio", "anno": 2026, "consumo": 120.5, "unita_misura": "sm3", "tipo_gas": "metano"}
-        ]
-        Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
-        Rispondi ESCLUSIVAMENTE con l'array JSON.
-        """
+    if not testo.strip():
+        q.put(f"   [Avviso] Il PDF sembra una scansione/immagine. Verrà inserito Consumo 0.")
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello_attivo}:generateContent?key={api_key}"
-        payload = {"contents": [{"parts": [{"text": prompt_testi}]}]}
+    testo_lower = testo.lower()
+    
+    # 1. Trova Mese e Anno (Cerca prima nel nome file, poi nel testo)
+    mesi = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 
+            'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre']
+    mese_trovato = "sconosciuto"
+    anno_trovato = 2026 # Anno di default
+    
+    for m in mesi:
+        if m in nome_file.lower():
+            mese_trovato = m
+            break
+    
+    match_anno = re.search(r"(202\d)", nome_file)
+    if match_anno:
+        anno_trovato = int(match_anno.group(1))
         
-        for tentativo in range(3):
+    if mese_trovato == "sconosciuto":
+        for m in mesi:
+            if m in testo_lower:
+                mese_trovato = m
+                break
+    if not match_anno:
+        match_anno_testo = re.search(r"(202\d)", testo_lower)
+        if match_anno_testo:
+            anno_trovato = int(match_anno_testo.group(1))
+
+    # 2. Determina Unità e Tipo Gas
+    unita = "kwh" if "elettrica" in tipo_bolletta else "sm3"
+    tipo_gas = "" if "elettrica" in tipo_bolletta else "metano"
+    
+    if "gasolio" in nome_file.lower() or "gasolio" in tipo_bolletta:
+        tipo_gas = "gasolio"
+        unita = "litri"
+    elif "gpl" in nome_file.lower() or "gpl" in tipo_bolletta:
+        tipo_gas = "gpl"
+        unita = "litri"
+
+    # 3. Estrazione del Consumo tramite pattern intelligenti
+    consumo = 0.0
+    
+    # Pattern: cerca parole chiave seguite da numeri e unità, oppure solo numeri e unità
+    patterns = [
+        rf"(?:consum[oi]|fatturato|totale|energia attiva|prelevata)[\s\S]{{0,60}}?([\d\.,]+)\s*({unita})",
+        rf"([\d\.,]+)\s*({unita})"
+    ]
+    
+    for pat in patterns:
+        matches = re.findall(pat, testo_lower)
+        if matches:
+            val_str = matches[0][0]
+            # Converte formato italiano in float (es. 1.234,56 -> 1234.56)
+            val_str = val_str.replace('.', '').replace(',', '.')
             try:
-                res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=60)
-                if res.status_code == 200:
-                    testo_risposta = res.json()['candidates'][0]['content']['parts'][0]['text']
-                    testo_pulito = testo_risposta.strip().replace('```json', '').replace('```', '').strip()
-                    try:
-                        risultati_lista = json.loads(testo_pulito)
-                        for item in risultati_lista:
-                            item['consumo_kwh_convertito'] = calcola_kwh(item)
-                            dati_finali.append(item)
-                            q.put(f"   [OK] Dati estratti da {item.get('nome_file', 'file')} -> {item['consumo_kwh_convertito']} kWh")
-                        break
-                    except json.JSONDecodeError:
-                        q.put("   [Avviso] Errore di formato da Gemini, riprovo...")
-                        time.sleep(3)
-                elif res.status_code in [503, 429]:
-                    q.put("   [Server Occupato] Attendo 5 secondi...")
-                    time.sleep(5)
-                else:
-                    q.put(f"   [Errore API] {res.text}")
-                    break
-            except Exception as e:
-                q.put(f"   [Errore Rete] Riprovo... ({e})")
-                time.sleep(3)
-
-    # B) ELABORAZIONE DEI FILE IMMAGINE/SCANSIONATI (Utilizzando il modello dinamicamente rilevato)
-    if bollette_immagini:
-        q.put(f"--- FASE 3: Analisi IA Visiva per {len(bollette_immagini)} file scansionati ---")
-        for p in bollette_immagini:
-            nome_file = os.path.basename(p)
-            q.put(f" -> Invio immagine a Gemini: {nome_file}")
-            try:
-                with open(p, "rb") as doc_file:
-                    pdf_bytes = doc_file.read()
-                pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+                consumo = float(val_str)
+                break
+            except:
+                pass
                 
-                prompt = f"""Leggi questa bolletta di {tipo_bolletta}. Estrai i dati in UN ARRAY JSON di 1 elemento:
-                [{{"nome_file": "{nome_file}", "mese": "gennaio", "anno": 2026, "consumo": 120.5, "unita_misura": "sm3", "tipo_gas": "metano"}}]"""
-                
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello_attivo}:generateContent?key={api_key}"
-                payload = {"contents": [{"parts": [{"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}}, {"text": prompt}]}]}
-                
-                res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=45)
-                if res.status_code == 200:
-                    testo_risposta = res.json()['candidates'][0]['content']['parts'][0]['text']
-                    testo_pulito = testo_risposta.strip().replace('```json', '').replace('```', '').strip()
-                    item = json.loads(testo_pulito)[0]
-                    item['consumo_kwh_convertito'] = calcola_kwh(item)
-                    dati_finali.append(item)
-                    q.put(f"   [OK Visivo] {nome_file} -> {item['consumo_kwh_convertito']} kWh")
-                else:
-                    q.put(f"   [Errore Visivo] File saltato a causa del server occupato.")
-                
-                time.sleep(4)
-            except Exception as e:
-                q.put(f"   [Errore Elaborazione] {e}")
-
-    return dati_finali
+    # 4. Calcolo conversione kWh
+    kwh_conv = consumo
+    if unita != 'kwh':
+        fattore = 1.0
+        if 'metano' in tipo_gas and unita in ['sm3', 'm3']:
+            fattore = 10.5
+        elif 'gpl' in tipo_gas and unita in ['litri', 'l']:
+            fattore = 7.0
+        kwh_conv = round(consumo * fattore, 2)
+        
+    q.put(f"   [OK] Estratto: {consumo} {unita} ({kwh_conv} kWh)")
+    
+    return {
+        "nome_file": nome_file,
+        "mese": mese_trovato.capitalize(),
+        "anno": anno_trovato,
+        "consumo": consumo,
+        "unita_misura": unita,
+        "tipo_gas": tipo_gas.capitalize(),
+        "consumo_kwh_convertito": kwh_conv
+    }
 
 # ==========================================
-# 4. INTERFACCIA WEB (FRONTEND E WORKER)
+# 3. INTERFACCIA WEB E WORKER
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Motore ESG Ultraveloce</title>
+    <title>Motore ESG 100% Locale</title>
     <style>
         body { font-family: Arial; padding: 40px; background: #f4f6f8; }
         .box { background: white; padding: 25px; border-radius: 8px; max-width: 500px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }
         input { width: 100%; padding: 10px; margin: 8px 0 16px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
-        button { padding: 12px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; }
-        button:hover { background: #1557b0; }
-        h2 { color: #1a73e8; text-align: center; margin-top: 0; }
+        button { padding: 12px 20px; background: #2e7d32; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; font-size: 1.1em; }
+        button:hover { background: #1b5e20; }
+        h2 { color: #2e7d32; text-align: center; margin-top: 0; }
         label { font-weight: bold; font-size: 0.9em; color: #333; }
+        .badge { background: #e8f5e9; color: #2e7d32; padding: 5px 10px; border-radius: 4px; font-size: 0.8em; display: inline-block; margin-bottom: 20px; border: 1px solid #c8e6c9;}
     </style>
 </head>
 <body>
     <div class="box">
-        <h2>Motore di Estrazione Consumi ESG</h2>
+        <h2>Motore ESG <br><small style="font-size: 0.6em; color: #666;">Elaborazione Locale</small></h2>
+        <div style="text-align: center;"><span class="badge">Nessuna API richiesta - Massima Privacy</span></div>
         <form action="/avvia" method="POST">
             <label>Nome Azienda/Cliente (senza spazi):</label>
             <input type="text" name="nome_cliente" placeholder="es. ditta_rossi" required>
             <label>Percorso Server/Cartella Principale (Root):</label>
             <input type="text" name="percorso_root" placeholder="es. C:\\Archivio_Dati" required>
-            <label>Google AI Studio API Key (Password):</label>
-            <input type="password" name="api_key" placeholder="Incolla qui la tua chiave API" required>
-            <button type="submit">Avvia Motore Ultraveloce</button>
+            <button type="submit">Genera Excel Istantaneamente</button>
         </form>
     </div>
 </body>
@@ -243,7 +190,6 @@ def home():
 def avvia_processo():
     nome_cliente = request.form['nome_cliente'].strip()
     percorso_root = request.form['percorso_root'].strip()
-    api_key_inserita = request.form['api_key'].strip()
     q = queue.Queue()
 
     def background_worker():
@@ -253,9 +199,8 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            q.put("Inizializzazione motore Ibrido Ultraveloce...")
-            config = trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
-            chiave_attiva = config.get('api_key')
+            q.put("Inizializzazione motore di estrazione LOCALE...")
+            config = trova_e_memorizza_cartelle(percorso_root, nome_cliente, q)
 
             file_ee_paths = []
             if config.get("ee") and os.path.exists(config["ee"]):
@@ -271,13 +216,18 @@ def avvia_processo():
                 return
 
             q.put(f"Trovati {len(file_ee_paths)} file Energia Elettrica e {len(file_gas_paths)} file Gas.")
+            q.put("--- Inizio elaborazione istantanea senza server ---")
 
-            # Trovo il modello attivo DA PASSARE alla funzione ibrida
-            modello_attivo = trova_modello_valido(chiave_attiva, q)
+            dati_ee = []
+            dati_gas = []
 
-            # Elaborazione radicale ultrarapida (Passando il modello_attivo!)
-            dati_ee = estrai_dati_intelligente(file_ee_paths, "energia elettrica", chiave_attiva, modello_attivo, q)
-            dati_gas = estrai_dati_intelligente(file_gas_paths, "gas", chiave_attiva, modello_attivo, q)
+            for p in file_ee_paths:
+                res = estrai_dati_locale(p, "energia elettrica", q)
+                if res: dati_ee.append(res)
+                
+            for p in file_gas_paths:
+                res = estrai_dati_locale(p, "gas", q)
+                if res: dati_gas.append(res)
 
             q.put("\n--- Generazione file Excel sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -308,8 +258,8 @@ def avvia_processo():
                 body {{ font-family: Arial; padding: 40px; background: #f4f6f8; }}
                 .box {{ background: white; padding: 25px; border-radius: 8px; max-width: 800px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }}
                 #log-box {{ background: #1e1e1e; color: #00ff66; padding: 15px; border-radius: 5px; height: 400px; overflow-y: scroll; font-family: monospace; font-size: 0.9em; margin-top: 15px; white-space: pre-wrap; }}
-                h2 {{ color: #1a73e8; text-align: center; margin-top: 0; }}
-                .btn {{ display: inline-block; margin-top: 20px; background: #1a73e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold; }}
+                h2 {{ color: #2e7d32; text-align: center; margin-top: 0; }}
+                .btn {{ display: inline-block; margin-top: 20px; background: #2e7d32; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold; }}
             </style>
             <script>
                 function appendLog(text) {{
@@ -321,7 +271,7 @@ def avvia_processo():
         </head>
         <body>
             <div class="box">
-                <h2>Elaborazione Consumi ESG Ultraveloce</h2>
+                <h2>Elaborazione Consumi ESG <br><small style="color:#666; font-size:0.6em;">Offline & Istantanea</small></h2>
                 <div id="log-box"></div>
                 <div id="result-area"></div>
             </div>
@@ -334,7 +284,7 @@ def avvia_processo():
             if isinstance(item, tuple) and item[0] == "DONE":
                 file_path = item[1]
                 if file_path:
-                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #2e7d32; text-align:center;\">Processo Completato con Successo!</h3><p style=\"text-align:center;\">File salvato sul Desktop:<br><b>{file_path}</b></p><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
+                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #2e7d32; text-align:center;\">Processo Completato in 1 Secondo!</h3><p style=\"text-align:center;\">File salvato sul Desktop:<br><b>{file_path}</b></p><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
                 else:
                     yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #c62828; text-align:center;\">Terminato con errori.</h3><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
                 break
