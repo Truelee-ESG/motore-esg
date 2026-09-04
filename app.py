@@ -56,24 +56,23 @@ def formatta_numero_italiano(val_str):
     return float(v)
 
 # ==========================================
-# 2. MOTORE DI ESTRAZIONE A PUNTEGGIO (SCORING)
+# 2. MOTORE DI ESTRAZIONE A PUNTEGGIO (SOLO PRIMA PAGINA)
 # ==========================================
 def estrai_dati_locale(percorso_file, categoria, q):
     nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Analisi documento: {nome_file}")
+    q.put(f" -> Analisi documento (Solo Pagina 1): {nome_file}")
     
-    testo_completo = ""
+    testo_prima_pagina = ""
     try:
         reader = PdfReader(percorso_file)
-        for page in reader.pages:
-            estratto = page.extract_text()
-            if estratto:
-                testo_completo += estratto + "\n"
+        # LEGGE RIGOROSAMENTE SOLO LA PRIMA PAGINA (indice 0)
+        if len(reader.pages) > 0:
+            testo_prima_pagina = reader.pages[0].extract_text() or ""
     except Exception:
         q.put(f"   [Errore] Impossibile leggere {nome_file}.")
         return None
         
-    testo_tot_lower = testo_completo.lower()
+    testo_p1_lower = testo_prima_pagina.lower()
     
     # Rilevamento Mese e Anno
     mesi = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 
@@ -92,11 +91,11 @@ def estrai_dati_locale(percorso_file, categoria, q):
         
     if mese_trovato == "Gennaio":
         for m in mesi:
-            if m in testo_tot_lower:
+            if m in testo_p1_lower:
                 mese_trovato = m.capitalize()
                 break
     if not match_anno:
-        match_anno_testo = re.search(r"(202\d)", testo_tot_lower)
+        match_anno_testo = re.search(r"(202\d)", testo_p1_lower)
         if match_anno_testo:
             anno_trovato = int(match_anno_testo.group(1))
 
@@ -104,60 +103,62 @@ def estrai_dati_locale(percorso_file, categoria, q):
     candidati = []
     unita_misura = "KWH" if categoria == 'energia_elettrica' else "Litri"
     
-    # Regex universale per catturare QUALSIASI numero (da 1 a 6 cifre intere)
-    matches = re.finditer(r'\b(\d{1,6}(?:[.,]\d{3})*(?:[.,]\d+)?)\b', testo_tot_lower)
+    # Cattura qualsiasi potenziale numero nella prima pagina
+    matches = re.finditer(r'\b(\d{1,6}(?:[.,]\d{3})*(?:[.,]\d+)?)\b', testo_p1_lower)
     
     for m in matches:
         val_str = m.group(1)
         
-        # Filtra palesemente gli anni e date
+        # Filtra palesemente gli anni solari
         if val_str in ['2022', '2023', '2024', '2025', '2026', '2027']:
             continue
             
         try:
             num = formatta_numero_italiano(val_str)
-            if num <= 0 or num > 600000:  # Oltre i 600.000 è al 99% un codice POD o una Partita Iva
+            # Tagliamo fuori numeri impossibili da essere consumi su singola bolletta
+            if num <= 0 or num > 600000:  
                 continue
                 
-            # Ritaglia una finestra di contesto di 60 caratteri prima e dopo il numero
-            start = max(0, m.start() - 60)
-            end = min(len(testo_tot_lower), m.end() + 60)
-            contesto = testo_tot_lower[start:end]
+            # Finestra di contesto ristretta attorno al numero (50 caratteri)
+            start = max(0, m.start() - 50)
+            end = min(len(testo_p1_lower), m.end() + 50)
+            contesto = testo_p1_lower[start:end]
             
             score = 0
             
             if categoria == 'energia_elettrica':
-                if 'kwh' in contesto or 'kw/h' in contesto: score += 50
-                if any(w in contesto for w in ['consumo', 'totale', 'fatturat', 'prelevata', 'attiva']): score += 40
-                if any(w in contesto for w in ['f1', 'f2', 'f3']): score += 15
+                # Punti positivi per le parole classiche dei riepiloghi di prima pagina
+                if 'kwh' in contesto or 'kw/h' in contesto: score += 60
+                if any(w in contesto for w in ['consumo', 'totale', 'fatturat', 'periodo']): score += 50
+                if any(w in contesto for w in ['energia', 'attiva', 'prelevata']): score += 30
                 
-                # Penalità Gravissime (Se trova queste parole, il numero quasi sicuramente NON è un consumo)
-                if '€' in contesto or 'euro' in contesto or 'importo' in contesto: score -= 100
-                if any(w in contesto for w in ['lettura', 'precedente', 'attuale', 'potenza', 'impegnata', 'disponibile', 'pod', 'codice']): score -= 100
+                # Penalità durissime: escludiamo i costi in Euro e i dati del contatore
+                if '€' in contesto or 'euro' in contesto or 'importo' in contesto or 'spesa' in contesto: score -= 150
+                if any(w in contesto for w in ['lettura', 'precedente', 'attuale', 'potenza', 'impegnata', 'disponibile', 'pod', 'cliente', 'codice']): score -= 150
                 
-                # Penalità per costanti tecniche o tasse (es. potenze contatore 3.0, 4.5, ecc.)
-                if num in [3.0, 3.3, 4.5, 6.0, 10.0, 15.0]: score -= 80
+                # Penalità per le costanti di potenza (es. 3.0, 4.5, 6.0 kW)
+                if num in [3.0, 3.3, 4.5, 6.0, 10.0, 15.0]: score -= 100
                 
             elif categoria == 'trasporti':
-                if any(w in contesto for w in ['litri', 'lt', 'l ']): score += 50
-                if any(w in contesto for w in ['quantit', 'volume', 'erogata', 'totale']): score += 40
+                if any(w in contesto for w in ['litri', 'lt', 'l ']): score += 60
+                if any(w in contesto for w in ['quantit', 'volume', 'erogata', 'totale']): score += 50
                 
-                if '€' in contesto or 'euro' in contesto or 'importo' in contesto: score -= 100
-                if any(w in contesto for w in ['km', 'chilometri', 'targa', 'sconto']): score -= 100
+                if '€' in contesto or 'euro' in contesto or 'importo' in contesto: score -= 150
+                if any(w in contesto for w in ['km', 'chilometri', 'targa', 'sconto']): score -= 150
                 
             if score > 0:
                 candidati.append({'valore': num, 'score': score})
         except:
             continue
             
-    # Rimuovi duplicati mantenendo lo score più alto per ogni valore
+    # Gestione candidati per mantenere solo il punteggio massimo per ogni numero distinto
     candidati_unici = {}
     for c in candidati:
         v = c['valore']
         if v not in candidati_unici or c['score'] > candidati_unici[v]:
             candidati_unici[v] = c['score']
             
-    # Ordina i numeri dal più probabile al meno probabile
+    # Ordina dal punteggio più alto
     lista_candidati = [{'valore': k, 'score': v} for k, v in candidati_unici.items()]
     lista_candidati.sort(key=lambda x: x['score'], reverse=True)
     
@@ -166,9 +167,9 @@ def estrai_dati_locale(percorso_file, categoria, q):
     # Rilevamento carburante
     tipo_carburante = ""
     if categoria == 'trasporti':
-        if any(w in testo_tot_lower for w in ['gasolio', 'diesel', 'f.o.', 'gas.']):
+        if any(w in testo_p1_lower for w in ['gasolio', 'diesel', 'f.o.', 'gas.']):
             tipo_carburante = "Gasolio"
-        elif any(w in testo_tot_lower for w in ['benzina', 'verde', 'super']):
+        elif any(w in testo_p1_lower for w in ['benzina', 'verde', 'super']):
             tipo_carburante = "Benzina"
         else:
             tipo_carburante = "Non specificato"
@@ -181,7 +182,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
         "anno": anno_trovato,
         "quantita": quantita,
         "unita_misura": unita_misura,
-        "candidati_alternativi": lista_candidati # Salviamo le alternative per la Fase 2
+        "candidati_alternativi": lista_candidati # Utile per il check in Fase 2
     }
     if categoria == 'trasporti':
         risultato["tipo_carburante"] = tipo_carburante
@@ -240,7 +241,7 @@ HTML_PAGE = """
             <div class="grid">
                 <div class="card">
                     <h3>Ambiente - Energia Elettrica</h3>
-                    <p style="color: #666; font-size: 0.9em;">Estrai kWh con Algoritmo a Scoring e Auto-correzione.</p>
+                    <p style="color: #666; font-size: 0.9em;">Estrai kWh (Analisi mirata su Prima Pagina).</p>
                     <button class="btn" onclick="avviaEstrazione('energia_elettrica')">Avvia Energia Elettrica</button>
                 </div>
                 
@@ -296,11 +297,11 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            q.put(f"Trovati {len(file_paths)} file PDF. Estrazione in corso...")
+            q.put(f"Trovati {len(file_paths)} file PDF. Estrazione in corso (Modalità Pagina 1)...")
 
             dati_estratti = []
             
-            # --- FASE 1: Scoring su tutti i file ---
+            # --- FASE 1: Scoring su tutti i file (Solo prima pagina) ---
             for p in file_paths:
                 res = estrai_dati_locale(p, categoria, q)
                 if res:
@@ -311,7 +312,7 @@ def avvia_processo():
             
             if len(valori_validi) >= 3:
                 mediana_consumi = statistics.median(valori_validi)
-                # Tolleranza ampia: i consumi possono calare molto o triplicare, ma non variare di 10x all'improvviso
+                # Tolleranza ampia: i consumi possono calare molto o triplicare
                 soglia_min = mediana_consumi * 0.15
                 soglia_max = mediana_consumi * 4.0
                 
@@ -321,25 +322,24 @@ def avvia_processo():
                     qta = d['quantita']
                     
                     if qta > 0 and (qta < soglia_min or qta > soglia_max):
-                        q.put(f" [!] Mese {d['mese']}: Il valore {qta} risulta fuori standard. Scansione alternative...")
+                        q.put(f" [!] Mese {d['mese']}: Il valore {qta} risulta anomalo. Scansione alternative in pag 1...")
                         
                         sostituito = False
-                        # Guarda gli altri numeri validi letti nel PDF che avevamo messo da parte
                         for alt in d.get('candidati_alternativi', []):
                             alt_val = alt['valore']
                             alt_score = alt['score']
                             
-                            # Se l'alternativa è diversa, ha uno score decente (>10) e RIENTRA nella media dell'anno...
+                            # Se l'alternativa ha senso logico ed è vicina alla mediana, sostituiscila
                             if alt_val != qta and alt_score > 10 and (soglia_min <= alt_val <= soglia_max):
                                 d['quantita'] = alt_val
-                                q.put(f"     -> [CORRETTO] Ho pescato un'ottima alternativa dal PDF: {alt_val}")
+                                q.put(f"     -> [CORRETTO] Trovata ottima alternativa nella sintesi: {alt_val}")
                                 sostituito = True
                                 break
                                 
                         if not sostituito:
                             q.put(f"     -> [IGNORATO] Nessuna alternativa migliore. Mantengo {qta}.")
             
-            # Pulizia dizionario prima di creare l'Excel
+            # Pulizia dizionario
             for d in dati_estratti:
                 if 'candidati_alternativi' in d:
                     del d['candidati_alternativi']
