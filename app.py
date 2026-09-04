@@ -120,7 +120,6 @@ def _process_energia_elettrica():
         except Exception:
             pass
 
-        # Aggiornamento barra di avanzamento e stato
         progress_elec.config(value=idx)
         lbl_status_elec.config(text=f"Controllati: {idx} / {total_files} (Validi: {valid_count})")
 
@@ -155,11 +154,11 @@ def _process_trasporti():
     ws = wb.active
     ws.title = "Trasporti Carburante"
     
-    ws.append([f"Estrazione dati fatture carburante (gasolio/benzina) - {datetime.now().strftime('%d/%m/%Y %H:%M')}"])
+    ws.append([f"Estrazione dati fatture carburante - {datetime.now().strftime('%d/%m/%Y %H:%M')}"])
     ws.cell(row=1, column=1).font = Font(size=12, bold=True, color="2E7D32")
     ws.append([])
     
-    headers = ["Azienda", "Nome File", "Periodo", "Anno", "Quantità", "Unità di misura"]
+    headers = ["Azienda", "Nome File", "Periodo", "Anno", "Quantità", "Unità di misura", "Carburante"]
     ws.append(headers)
     for col in range(1, len(headers) + 1):
         cell = ws.cell(row=3, column=col)
@@ -173,6 +172,7 @@ def _process_trasporti():
         ext = filename.lower()
         quantita = "Non rilevato"
         unita_misura = "Litri"
+        carburante = "Non rilevato"
         text = ""
         try:
             if ext.endswith('.pdf'):
@@ -184,31 +184,43 @@ def _process_trasporti():
 
             if text:
                 text_lower = text.lower()
-                if any(k in text_lower for k in ["gasolio", "benzina", "carburante", "litri", "l"]):
+                if any(k in text_lower for k in ["gasolio", "benzina", "diesel", "carburante", "litri", "l", "mc", "smc"]):
                     periodo, anno = estrai_mesi_e_anno(text, text_lower)
                     
-                    match_qty = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L|litro|kg|KG)', text)
-                    if match_qty:
-                        quantita = match_qty.group(1)
-                        if "kg" in match_qty.group(0).lower():
-                            unita_misura = "kg"
+                    # Determinazione tipo carburante
+                    if "benzina" in text_lower:
+                        carburante = "Benzina"
+                    elif any(k in text_lower for k in ["gasolio", "diesel"]):
+                        carburante = "Diesel"
+
+                    # 1. Cerca prima con unità esplicita (litri, L, mc, smc)
+                    match_qty_unit = re.search(r'(\d+[\.,]?\d*)\s*(litri|Litri|L|litro|mc|MC|Smc|SMC|smc)', text)
+                    if match_qty_unit:
+                        quantita = match_qty_unit.group(1)
+                        u_raw = match_qty_unit.group(2).lower()
+                        if any(u in u_raw for u in ["mc", "smc"]):
+                            unita_misura = "Metri cubi"
                         else:
                             unita_misura = "Litri"
                     else:
-                        match_dec = re.search(r'(?:quantit[aà]|litri)\D{0,15}(\d+[\.,]\d{2})', text_lower)
-                        if match_dec:
-                            quantita = match_dec.group(1)
+                        # 2. Cerca sotto la voce "quantità", "q.tà", "q,tà", "qta"
+                        match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,15}(\d+[\.,]?\d*)', text_lower)
+                        if match_label:
+                            quantita = match_label.group(1)
+                            if any(u in text_lower for u in ["mc", "smc", "metri cubi"]):
+                                unita_misura = "Metri cubi"
+                            else:
+                                unita_misura = "Litri"
 
                 if quantita != "Non rilevato":
                     row_idx = ws.max_row + 1
-                    ws.append([azienda, filename, periodo, anno, quantita, unita_misura])
+                    ws.append([azienda, filename, periodo, anno, quantita, unita_misura, carburante])
                     ws.cell(row=row_idx, column=2).hyperlink = os.path.abspath(file_path)
                     ws.cell(row=row_idx, column=2).font = Font(color="0563C1", underline="single")
                     valid_count += 1
         except Exception:
             pass
 
-        # Aggiornamento barra di avanzamento e stato
         progress_trans.config(value=idx)
         lbl_status_trans.config(text=f"Controllati: {idx} / {total_files} (Validi: {valid_count})")
 
