@@ -75,10 +75,12 @@ def trova_modello_valido(api_key, q):
     return 'gemini-2.5-flash'
 
 # ==========================================
-# 3. ESTRAZIONE RESILIENTE CON MULTI-FALLBACK
+# 3. ESTRAZIONE SEQUENZIALE SICURA CON GESTIONE QUOTA 429
 # ==========================================
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, q):
-    q.put(f" -> Analisi bolletta: {os.path.basename(percorso_file)}")
+    nome_file = os.path.basename(percorso_file)
+    q.put(f" -> Analisi bolletta: {nome_file}")
+    
     with open(percorso_file, "rb") as doc_file:
         pdf_bytes = doc_file.read()
     pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
@@ -90,7 +92,6 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, 
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    # Lista di modelli da provare in sequenza automatica in caso di sovraccarico
     modelli_da_provare = [modello_iniziale] + [m for m in ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash'] if m != modello_iniziale]
     
     ultimo_errore = None
@@ -116,62 +117,58 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, 
         }
         headers = {"Content-Type": "application/json"}
         
-        tentativi = 2
-        modello_riuscito = False
-        data_risposta = None
-        
+        tentativi = 4
         for tentativo in range(tentativi):
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=45)
+                response = requests.post(url, json=payload, headers=headers, timeout=60)
                 if response.status_code == 200:
                     data_risposta = response.json()
-                    modello_riuscito = True
-                    break
-                elif response.status_code in [503, 429]:
-                    q.put(f"    [Avviso] Modello {modello} occupato (503/429). Riprovo ({tentativo+1}/{tentativi})...")
-                    time.sleep(2)
+                    testo = data_risposta['candidates'][0]['content']['parts'][0]['text']
+                    testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
+                    dati = json.loads(testo_pulito)
+                    
+                    # Conversione kWh
+                    consumo = float(dati.get('consumo', 0))
+                    unita = str(dati.get('unita_misura', '')).lower()
+                    tipo_gas = str(dati.get('tipo_gas', '')).lower()
+                    
+                    if unita == 'kwh':
+                        kwh = consumo
+                    else:
+                        fattore = 1.0
+                        if 'metano' in tipo_gas and unita in ['sm3', 'm3']:
+                            fattore = 10.5  
+                        elif 'gpl' in tipo_gas and unita in ['litri', 'l']:
+                            fattore = 7.0
+                        kwh = round(consumo * fattore, 2)
+                        
+                    dati['consumo_kwh_convertito'] = kwh
+                    q.put(f"   [OK] {nome_file} -> {kwh} kWh")
+                    return dati
+                    
+                elif response.status_code == 429:
+                    # Raggiunto il limite di richieste di Google: leggiamo il tempo di attesa o usiamo 25 secondi di pausa
+                    q.put(f"   [Quota Superata] Google richiede una pausa. Attendo 25 secondi prima di riprovare...")
+                    time.sleep(25)
+                    ultimo_errore = response.text
+                    continue
+                elif response.status_code == 503:
+                    q.put(f"   [Server Occupati] Riprovo tra 5 secondi...")
+                    time.sleep(5)
                     ultimo_errore = response.text
                     continue
                 else:
                     ultimo_errore = response.text
-                    break # Passa al prossimo modello se c'è un errore diverso
-            except requests.exceptions.RequestException as e:
+                    break # Passa al modello successivo se l'errore è diverso
+            except Exception as e:
                 ultimo_errore = str(e)
-                time.sleep(1)
+                time.sleep(3)
                 continue
                 
-        if modello_riuscito and data_risposta:
-            try:
-                testo = data_risposta['candidates'][0]['content']['parts'][0]['text']
-                testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
-                return json.loads(testo_pulito)
-            except Exception as parse_err:
-                q.put(f"    [Avviso] Errore parsing risposta da {modello}, provo modello alternativo...")
-                continue
-        else:
-            q.put(f"    [Info] Modello {modello} non ha risposto, passo al modello di riserva...")
-            
-    raise Exception(f"Tutti i modelli disponibili hanno fallito l'estrazione per questo file. Ultimo errore: {ultimo_errore}")
+    raise Exception(f"Impossibile elaborare il file {nome_file}. Ultimo errore: {ultimo_errore}")
 
 def converti_in_kwh(dati):
-    try:
-        consumo = float(dati.get('consumo', 0))
-    except (ValueError, TypeError):
-        consumo = 0.0
-        
-    unita = str(dati.get('unita_misura', '')).lower()
-    tipo_gas = str(dati.get('tipo_gas', '')).lower()
-    
-    if unita == 'kwh':
-        return consumo
-        
-    fattore = 1.0
-    if 'metano' in tipo_gas and unita in ['sm3', 'm3']:
-        fattore = 10.5  
-    elif 'gpl' in tipo_gas and unita in ['litri', 'l']:
-        fattore = 7.0
-        
-    return round(consumo * fattore, 2)
+    return dati.get('consumo_kwh_convertito', 0)
 
 # ==========================================
 # 4. INTERFACCIA WEB (FRONTEND)
@@ -243,34 +240,39 @@ def avvia_processo():
             dati_ee = []
             dati_gas = []
 
-            q.put("--- Inizio analisi bollette PDF ---")
-            
             cartella_ee = config.get("ee")
+            file_ee_paths = []
             if cartella_ee and os.path.exists(cartella_ee):
-                q.put(f"Scansione file PDF in Energia Elettrica: {cartella_ee}")
                 for f in os.listdir(cartella_ee):
                     if f.lower().endswith('.pdf'):
-                        percorso_pdf = os.path.join(cartella_ee, f)
-                        dati = estrai_dati_da_pdf(percorso_pdf, "energia elettrica", chiave_attiva, modello_attivo, q)
-                        dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
-                        dati_ee.append(dati)
-                        q.put(f"   [OK] {f} -> {dati['consumo_kwh_convertito']} kWh")
+                        file_ee_paths.append(os.path.join(cartella_ee, f))
                         
             cartella_gas = config.get("gas")
+            file_gas_paths = []
             if cartella_gas and os.path.exists(cartella_gas):
-                q.put(f"Scansione file PDF in Gas: {cartella_gas}")
                 for f in os.listdir(cartella_gas):
                     if f.lower().endswith('.pdf'):
-                        percorso_pdf = os.path.join(cartella_gas, f)
-                        dati = estrai_dati_da_pdf(percorso_pdf, "gas", chiave_attiva, modello_attivo, q)
-                        dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
-                        dati_gas.append(dati)
-                        q.put(f"   [OK] {f} -> {dati['consumo_kwh_convertito']} kWh")
+                        file_gas_paths.append(os.path.join(cartella_gas, f))
 
-            if not cartella_ee and not cartella_gas:
-                q.put("ATTENZIONE: Nessuna cartella trovata.")
+            if not file_ee_paths and not file_gas_paths:
+                q.put("ATTENZIONE: Nessun file PDF trovato nelle cartelle.")
                 q.put(("DONE", None))
                 return
+
+            q.put(f"--- Inizio elaborazione di {len(file_ee_paths)} file EE e {len(file_gas_paths)} file Gas ---")
+
+            # Elaborazione sequenziale con pausa di sicurezza anti-sovraccarico (anti-429) tra un file e l'altro
+            for p in file_ee_paths:
+                res = estrai_dati_da_pdf(p, "energia elettrica", chiave_attiva, modello_attivo, q)
+                if res:
+                    dati_ee.append(res)
+                time.sleep(3) # Pausa di cortesia per rispettare i limiti di Google
+
+            for p in file_gas_paths:
+                res = estrai_dati_da_pdf(p, "gas", chiave_attiva, modello_attivo, q)
+                if res:
+                    dati_gas.append(res)
+                time.sleep(3) # Pausa di cortesia per rispettare i limiti di Google
 
             q.put("--- Generazione file Excel sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -282,7 +284,7 @@ def avvia_processo():
                 if dati_gas:
                     pd.DataFrame(dati_gas).to_excel(writer, sheet_name='Gas', index=False)
                 if not dati_ee and not dati_gas:
-                    pd.DataFrame([{"Note": "Nessun file PDF trovato"}]).to_excel(writer, sheet_name='Vuoto', index=False)
+                    pd.DataFrame([{"Note": "Nessun dato estratto"}]).to_excel(writer, sheet_name='Vuoto', index=False)
 
             q.put(f"SUCCESSO: File Excel salvato in: {nome_file_excel}")
             q.put(("DONE", nome_file_excel))
@@ -319,7 +321,7 @@ def avvia_processo():
             <div class="box">
                 <h2>Elaborazione Consumi ESG in Corso</h2>
                 <p>Segui l'avanzamento delle operazioni in tempo reale:</p>
-                <div id="log-box">Inizializzazione motore...</div>
+                <div id="log-box">Inizializzazione motore sicuro...</div>
                 <div id="result-area"></div>
             </div>
         </body>
