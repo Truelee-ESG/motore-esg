@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import time
 import threading
 import webbrowser
 import requests
@@ -45,7 +46,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
     return config, f"Configurazione salvata in {nome_file_config}"
 
 # ==========================================
-# 2. LOGICA ESTRAZIONE TRAMITE REST API
+# 2. LOGICA ESTRAZIONE TRAMITE REST API CON RETRY
 # ==========================================
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
     with open(percorso_file, "rb") as doc_file:
@@ -59,8 +60,7 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    # Lista aggiornata dei modelli moderni di Google in ordine di priorità
-    modelli = ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.0-flash']
+    modelli = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.7-flash', 'gemini-3.6-flash']
     ultimo_errore = None
     
     for modello in modelli:
@@ -84,27 +84,43 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
         }
         headers = {"Content-Type": "application/json"}
         
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                testo = data['candidates'][0]['content']['parts'][0]['text']
-                testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
-                return json.loads(testo_pulito)
-            else:
-                ultimo_errore = response.text
-                if "404" in str(response.status_code) or "NotFound" in response.text:
+        # Tentativi multipli (retry) per gestire picchi di traffico temporanei (503 / 429)
+        tentativi = 3
+        successo = False
+        data_risposta = None
+        
+        for tentativo in range(tentativi):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=40)
+                if response.status_code == 200:
+                    data_risposta = response.json()
+                    successo = True
+                    break
+                elif response.status_code in [503, 429]:
+                    # Errore di sovraccarico temporaneo: attende qualche secondo e riprova
+                    time.sleep(3 * (tentativo + 1))
+                    ultimo_errore = response.text
                     continue
                 else:
-                    raise Exception(f"HTTP {response.status_code}: {response.text}")
-        except Exception as e:
-            ultimo_errore = str(e)
-            if "404" in str(e) or "NotFound" in str(e):
+                    ultimo_errore = response.text
+                    if "404" in str(response.status_code) or "NotFound" in response.text:
+                        break # Modello non trovato, passa al prossimo modello
+                    else:
+                        raise Exception(f"HTTP {response.status_code}: {response.text}")
+            except requests.exceptions.RequestException as e:
+                ultimo_errore = str(e)
+                time.sleep(2)
                 continue
-            else:
-                raise e
                 
-    raise Exception(f"Nessun modello disponibile. Ultimo errore: {ultimo_errore}")
+        if successo and data_risposta:
+            try:
+                testo = data_risposta['candidates'][0]['content']['parts'][0]['text']
+                testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
+                return json.loads(testo_pulito)
+            except Exception as parse_err:
+                raise Exception(f"Errore nella decodifica JSON da Gemini: {str(parse_err)} - Risposta: {data_risposta}")
+                
+    raise Exception(f"Tutti i tentativi falliti sui modelli disponibili. Ultimo errore: {ultimo_errore}")
 
 def converti_in_kwh(dati):
     try:
