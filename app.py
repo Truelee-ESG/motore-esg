@@ -47,14 +47,13 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
 # 2. LOGICA ESTRAZIONE DINAMICA
 # ==========================================
 def trova_modello_compatibile():
-    """Interroga Google per trovare automaticamente un modello attivo per la chiave inserita"""
     try:
         for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
+            if 'generateContent' in m.supported_generation_methods and ('flash' in m.name or '3.6' in m.name):
                 return m.name
     except Exception:
         pass
-    return 'gemini-1.5-flash'  # Fallback predefinito
+    return 'gemini-3.6-flash'
 
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
     with open(percorso_file, "rb") as doc_file:
@@ -72,7 +71,6 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    # Selezione automatica del modello disponibile
     nome_modello = trova_modello_compatibile()
     
     model = genai.GenerativeModel(nome_modello)
