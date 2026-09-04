@@ -50,8 +50,27 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
     return config
 
 # ==========================================
-# 2. LETTURA LOCALE TESTO (ULTRARAPIDA)
+# 2. SELEZIONE MODELLO OTTIMIZZATO E LETTURA LOCALE
 # ==========================================
+def trova_modello_valido(api_key, q):
+    q.put("Connessione a Google AI Studio per trovare il modello attivo...")
+    # Priorità ai nuovi modelli
+    modelli = ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.0-flash']
+    
+    for m in modelli:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+        payload = {"contents": [{"parts": [{"text": "test"}]}]}
+        try:
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=5)
+            if res.status_code != 404:
+                q.put(f"-> Modello ottimale agganciato con successo: {m}")
+                return m
+        except Exception:
+            continue
+            
+    q.put("-> Uso modello predefinito di riserva: gemini-3.6-flash")
+    return 'gemini-3.6-flash'
+
 def leggi_testo_pdf_locale(percorso_file):
     testo = ""
     try:
@@ -83,7 +102,7 @@ def calcola_kwh(item):
 # ==========================================
 # 3. MOTORE IBRIDO: TESTO IN BLOCCO + VISIVO SINGOLO
 # ==========================================
-def estrai_dati_intelligente(file_paths, tipo_bolletta, api_key, q):
+def estrai_dati_intelligente(file_paths, tipo_bolletta, api_key, modello_attivo, q):
     if not file_paths:
         return []
         
@@ -102,9 +121,7 @@ def estrai_dati_intelligente(file_paths, tipo_bolletta, api_key, q):
             bollette_immagini.append(p)
             q.put(f"   [Scansione Visiva Richiesta] {nome_file}")
 
-    modello_attivo = 'gemini-1.5-flash' # Modello super-veloce perfetto per il testo
-
-    # A) ELABORAZIONE IN BLOCCO DEI TESTI (Meno di 5 secondi per decine di file)
+    # A) ELABORAZIONE IN BLOCCO DEI TESTI (Utilizzando il modello dinamicamente rilevato)
     if bollette_testuali:
         q.put(f"--- FASE 2: Invio cumulativo leggero di {len(bollette_testuali)} file a Gemini ---")
         prompt_testi = f"Analizza queste bollette di {tipo_bolletta}:\n\n"
@@ -149,7 +166,7 @@ def estrai_dati_intelligente(file_paths, tipo_bolletta, api_key, q):
                 q.put(f"   [Errore Rete] Riprovo... ({e})")
                 time.sleep(3)
 
-    # B) ELABORAZIONE DEI FILE IMMAGINE/SCANSIONATI (Gestiti uno alla volta in sicurezza)
+    # B) ELABORAZIONE DEI FILE IMMAGINE/SCANSIONATI (Utilizzando il modello dinamicamente rilevato)
     if bollette_immagini:
         q.put(f"--- FASE 3: Analisi IA Visiva per {len(bollette_immagini)} file scansionati ---")
         for p in bollette_immagini:
@@ -166,7 +183,6 @@ def estrai_dati_intelligente(file_paths, tipo_bolletta, api_key, q):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello_attivo}:generateContent?key={api_key}"
                 payload = {"contents": [{"parts": [{"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}}, {"text": prompt}]}]}
                 
-                # Un solo tentativo o passa al file successivo per sicurezza
                 res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=45)
                 if res.status_code == 200:
                     testo_risposta = res.json()['candidates'][0]['content']['parts'][0]['text']
@@ -178,14 +194,14 @@ def estrai_dati_intelligente(file_paths, tipo_bolletta, api_key, q):
                 else:
                     q.put(f"   [Errore Visivo] File saltato a causa del server occupato.")
                 
-                time.sleep(4) # Pausa obbligatoria per i file immagine per evitare il blocco 429
+                time.sleep(4)
             except Exception as e:
                 q.put(f"   [Errore Elaborazione] {e}")
 
     return dati_finali
 
 # ==========================================
-# 4. INTERFACCIA WEB (FRONTEND)
+# 4. INTERFACCIA WEB (FRONTEND E WORKER)
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -256,9 +272,12 @@ def avvia_processo():
 
             q.put(f"Trovati {len(file_ee_paths)} file Energia Elettrica e {len(file_gas_paths)} file Gas.")
 
-            # Elaborazione radicale ultrarapida
-            dati_ee = estrai_dati_intelligente(file_ee_paths, "energia elettrica", chiave_attiva, q)
-            dati_gas = estrai_dati_intelligente(file_gas_paths, "gas", chiave_attiva, q)
+            # Trovo il modello attivo DA PASSARE alla funzione ibrida
+            modello_attivo = trova_modello_valido(chiave_attiva, q)
+
+            # Elaborazione radicale ultrarapida (Passando il modello_attivo!)
+            dati_ee = estrai_dati_intelligente(file_ee_paths, "energia elettrica", chiave_attiva, modello_attivo, q)
+            dati_gas = estrai_dati_intelligente(file_gas_paths, "gas", chiave_attiva, modello_attivo, q)
 
             q.put("\n--- Generazione file Excel sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
