@@ -12,45 +12,11 @@ from flask import Flask, request, render_template_string, Response
 app = Flask(__name__)
 
 # ==========================================
-# 1. RICERCA CARTELLE
+# 1. MOTORE DI ESTRAZIONE LOCALE POTENZIATO
 # ==========================================
-def trova_e_memorizza_cartelle(percorso_root, nome_cliente, q):
-    nome_file_config = f"config_{nome_cliente}.json"
-    percorso_root = percorso_root.strip('"\'').strip()
-    config = {"ee": None, "gas": None, "root": percorso_root}
-    
-    if os.path.exists(nome_file_config):
-        try:
-            with open(nome_file_config, 'r') as f:
-                config_salvata = json.load(f)
-                if config_salvata.get("root") == percorso_root:
-                    config = config_salvata
-        except Exception:
-            pass
-
-    if not config.get("ee") or not config.get("gas") or not os.path.exists(str(config.get("ee", ""))):
-        q.put("Scansione delle cartelle in corso sul PC...")
-        for root, dirs, files in os.walk(percorso_root):
-            for directory in dirs:
-                nome_dir = directory.lower()
-                if "energia" in nome_dir or "elettric" in nome_dir or "e.e" in nome_dir or "luce" in nome_dir:
-                    config["ee"] = os.path.join(root, directory)
-                    q.put(f"[Trovata] Cartella EE: {config['ee']}")
-                elif "gas" in nome_dir or "metano" in nome_dir or "gpl" in nome_dir:
-                    config["gas"] = os.path.join(root, directory)
-                    q.put(f"[Trovata] Cartella Gas: {config['gas']}")
-
-    with open(nome_file_config, 'w') as f:
-        json.dump(config, f, indent=4)
-        
-    return config
-
-# ==========================================
-# 2. MOTORE 100% LOCALE (REGEX)
-# ==========================================
-def estrai_dati_locale(percorso_file, tipo_bolletta, q):
+def estrai_dati_locale(percorso_file, categoria, q):
     nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Elaborazione istantanea: {nome_file}")
+    q.put(f" -> Analisi: {nome_file}")
     
     testo = ""
     try:
@@ -60,122 +26,199 @@ def estrai_dati_locale(percorso_file, tipo_bolletta, q):
             if estratto:
                 testo += estratto + "\n"
     except Exception as e:
-        q.put(f"   [Errore Lettura] Impossibile aprire il file.")
+        q.put(f"   [Errore] Impossibile leggere il file.")
         return None
         
     if not testo.strip():
-        q.put(f"   [Avviso] Il PDF sembra una scansione/immagine. Verrà inserito Consumo 0.")
+        q.put(f"   [Avviso] Il PDF sembra una scansione/immagine. Verrà inserito 0.")
         
     testo_lower = testo.lower()
     
-    # 1. Trova Mese e Anno (Cerca prima nel nome file, poi nel testo)
+    # --- TROVA MESE E ANNO ---
     mesi = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 
             'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre']
-    mese_trovato = "sconosciuto"
+    mese_trovato = "Sconosciuto"
     anno_trovato = 2026 # Anno di default
     
     for m in mesi:
-        if m in nome_file.lower():
-            mese_trovato = m
+        if m in nome_file.lower() or m in testo_lower:
+            mese_trovato = m.capitalize()
             break
-    
-    match_anno = re.search(r"(202\d)", nome_file)
+            
+    match_anno = re.search(r"(202\d)", nome_file) or re.search(r"(202\d)", testo_lower)
     if match_anno:
         anno_trovato = int(match_anno.group(1))
-        
-    if mese_trovato == "sconosciuto":
-        for m in mesi:
-            if m in testo_lower:
-                mese_trovato = m
-                break
-    if not match_anno:
-        match_anno_testo = re.search(r"(202\d)", testo_lower)
-        if match_anno_testo:
-            anno_trovato = int(match_anno_testo.group(1))
 
-    # 2. Determina Unità e Tipo Gas
-    unita = "kwh" if "elettrica" in tipo_bolletta else "sm3"
-    tipo_gas = "" if "elettrica" in tipo_bolletta else "metano"
-    
-    if "gasolio" in nome_file.lower() or "gasolio" in tipo_bolletta:
-        tipo_gas = "gasolio"
-        unita = "litri"
-    elif "gpl" in nome_file.lower() or "gpl" in tipo_bolletta:
-        tipo_gas = "gpl"
-        unita = "litri"
-
-    # 3. Estrazione del Consumo tramite pattern intelligenti
+    # --- IMPOSTAZIONI E REGEX PER CATEGORIA ---
     consumo = 0.0
+    unita = ""
+    kwh_conv = 0.0
     
-    # Pattern: cerca parole chiave seguite da numeri e unità, oppure solo numeri e unità
-    patterns = [
-        rf"(?:consum[oi]|fatturato|totale|energia attiva|prelevata)[\s\S]{{0,60}}?([\d\.,]+)\s*({unita})",
-        rf"([\d\.,]+)\s*({unita})"
-    ]
-    
+    if categoria == 'energia_elettrica':
+        unita = "kWh"
+        patterns = [
+            r"(?:energia attiva|prelevata|fatturat[oa]|totale|consum[oi])[\s\S]{0,50}?([\d\.,]+)\s*kwh", 
+            r"([\d\.,]+)\s*kwh"
+        ]
+    elif categoria == 'gas' or categoria == 'riscaldamento':
+        unita = "sm3"
+        patterns = [
+            r"(?:consum[oi]|metano|fatturat[oa])[\s\S]{0,50}?([\d\.,]+)\s*(?:sm3|m3|mc)", 
+            r"([\d\.,]+)\s*(?:sm3|m3|mc)"
+        ]
+    elif categoria == 'trasporti':
+        # Ottimizzazione specifica per Gasolio/Benzina!
+        unita = "litri"
+        patterns = [
+            r"(?:quantit[aà]|q\.t[aà]|litri|volume|erogat[oa])[\s\S]{0,40}?([\d\.,]+)",
+            r"([\d\.,]+)\s*(?:lt|litri|l|l\.)"
+        ]
+    elif categoria == 'rifiuti':
+        unita = "kg"
+        patterns = [r"(?:quantit[aà]|peso|totale)[\s\S]{0,40}?([\d\.,]+)\s*(?:kg|ton|t)"]
+    elif categoria == 'acqua':
+        unita = "mc"
+        patterns = [r"(?:consum[oi]|fatturat[oa]|metri cubi)[\s\S]{0,40}?([\d\.,]+)\s*(?:mc|m3)"]
+    elif categoria == 'formazione':
+        unita = "ore"
+        patterns = [r"(?:ore|durata|totale)[\s\S]{0,40}?([\d\.,]+)"]
+    else:
+        patterns = [r"([\d\.,]+)"]
+
+    # --- APPLICAZIONE REGEX E PULIZIA NUMERI ---
     for pat in patterns:
         matches = re.findall(pat, testo_lower)
         if matches:
-            val_str = matches[0][0]
-            # Converte formato italiano in float (es. 1.234,56 -> 1234.56)
+            val_str = matches[0]
+            if isinstance(val_str, tuple): val_str = val_str[0] # Se ci sono più gruppi
+            # Converte il formato italiano (es. 1.234,56 o 1234,56) nel formato PC (1234.56)
             val_str = val_str.replace('.', '').replace(',', '.')
             try:
                 consumo = float(val_str)
                 break
             except:
                 pass
-                
-    # 4. Calcolo conversione kWh
-    kwh_conv = consumo
-    if unita != 'kwh':
-        fattore = 1.0
-        if 'metano' in tipo_gas and unita in ['sm3', 'm3']:
-            fattore = 10.5
-        elif 'gpl' in tipo_gas and unita in ['litri', 'l']:
-            fattore = 7.0
-        kwh_conv = round(consumo * fattore, 2)
+
+    # --- CALCOLO CONVERSIONE IN KWH ---
+    if categoria == 'energia_elettrica':
+        kwh_conv = consumo
+    elif categoria in ['gas', 'riscaldamento']:
+        kwh_conv = round(consumo * 10.5, 2)
+    elif categoria == 'trasporti':
+        kwh_conv = round(consumo * 10.0, 2) # Stima approssimativa litri -> kWh
+    else:
+        kwh_conv = 0.0 # Acqua, Rifiuti, Formazione non hanno senso in kWh
         
-    q.put(f"   [OK] Estratto: {consumo} {unita} ({kwh_conv} kWh)")
+    q.put(f"   [OK] Estratto: {consumo} {unita}")
     
     return {
-        "nome_file": nome_file,
-        "mese": mese_trovato.capitalize(),
-        "anno": anno_trovato,
-        "consumo": consumo,
-        "unita_misura": unita,
-        "tipo_gas": tipo_gas.capitalize(),
-        "consumo_kwh_convertito": kwh_conv
+        "File": nome_file,
+        "Mese": mese_trovato,
+        "Anno": anno_trovato,
+        "Quantita/Consumo": consumo,
+        "Unita_Misura": unita,
+        "Valore_Convertito_kWh": kwh_conv if kwh_conv > 0 else ""
     }
 
 # ==========================================
-# 3. INTERFACCIA WEB E WORKER
+# 2. INTERFACCIA WEB (DASHBOARD A GRIGLIA)
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Motore ESG 100% Locale</title>
+    <title>Dashboard ESG</title>
     <style>
-        body { font-family: Arial; padding: 40px; background: #f4f6f8; }
-        .box { background: white; padding: 25px; border-radius: 8px; max-width: 500px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }
-        input { width: 100%; padding: 10px; margin: 8px 0 16px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
-        button { padding: 12px 20px; background: #2e7d32; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; font-size: 1.1em; }
-        button:hover { background: #1b5e20; }
-        h2 { color: #2e7d32; text-align: center; margin-top: 0; }
-        label { font-weight: bold; font-size: 0.9em; color: #333; }
-        .badge { background: #e8f5e9; color: #2e7d32; padding: 5px 10px; border-radius: 4px; font-size: 0.8em; display: inline-block; margin-bottom: 20px; border: 1px solid #c8e6c9;}
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 20px; color: #333;}
+        .container { max-width: 1100px; margin: 0 auto; }
+        .header-panel { background: white; padding: 20px 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 30px; display: flex; gap: 20px; align-items: center;}
+        .header-panel input { flex: 1; padding: 12px; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); border: 1px solid #eaeaea; display: flex; flex-direction: column; text-align: center; transition: transform 0.2s;}
+        .card:hover { transform: translateY(-3px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        .card h3 { margin-top: 0; color: #202124; font-size: 1.25em; margin-bottom: 15px;}
+        .card p { color: #5f6368; font-size: 0.95em; line-height: 1.4; flex-grow: 1; margin-bottom: 25px;}
+        .btn { background: #1a73e8; color: white; border: none; padding: 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1em; width: 100%; transition: background 0.3s;}
+        .btn:hover { background: #1557b0; }
+        h1 { text-align: center; color: #2e7d32; margin-bottom: 5px;}
+        .subtitle { text-align: center; color: #666; margin-bottom: 30px;}
     </style>
+    <script>
+        function elabora(categoria) {
+            const cliente = document.getElementById('cliente').value;
+            const percorso = document.getElementById('percorso').value;
+            
+            if(!cliente || !percorso) {
+                alert("Inserisci Nome Cliente e Percorso Cartella prima di cliccare sui bottoni.");
+                return;
+            }
+            
+            document.getElementById('form_cliente').value = cliente;
+            document.getElementById('form_percorso').value = percorso;
+            document.getElementById('form_categoria').value = categoria;
+            document.getElementById('hiddenForm').submit();
+        }
+    </script>
 </head>
 <body>
-    <div class="box">
-        <h2>Motore ESG <br><small style="font-size: 0.6em; color: #666;">Elaborazione Locale</small></h2>
-        <div style="text-align: center;"><span class="badge">Nessuna API richiesta - Massima Privacy</span></div>
-        <form action="/avvia" method="POST">
-            <label>Nome Azienda/Cliente (senza spazi):</label>
-            <input type="text" name="nome_cliente" placeholder="es. ditta_rossi" required>
-            <label>Percorso Server/Cartella Principale (Root):</label>
-            <input type="text" name="percorso_root" placeholder="es. C:\\Archivio_Dati" required>
-            <button type="submit">Genera Excel Istantaneamente</button>
+    <div class="container">
+        <h1>Motore di Estrazione ESG</h1>
+        <p class="subtitle">Elaborazione 100% Locale, Veloce e Sicura.</p>
+
+        <div class="header-panel">
+            <input type="text" id="cliente" placeholder="Nome Azienda / Cliente (es. Cecconato)" required>
+            <input type="text" id="percorso" placeholder="Incolla qui il percorso della cartella con i PDF..." required>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h3>Ambiente - Rifiuti</h3>
+                <p>Carica qui i file relativi allo scarico dei rifiuti.</p>
+                <button class="btn" onclick="elabora('rifiuti')">Cartella Drive "RIFIUTI"</button>
+            </div>
+            
+            <div class="card">
+                <h3>Ambiente - Energia Elettrica</h3>
+                <p>Carica qui le bollette dell'energia elettrica.</p>
+                <button class="btn" onclick="elabora('energia_elettrica')">Cartella Drive "E. E."</button>
+            </div>
+            
+            <div class="card">
+                <h3>Ambiente - Gas</h3>
+                <p>Carica qui le bollette del gas.</p>
+                <button class="btn" onclick="elabora('gas')">Cartella Drive "GAS"</button>
+            </div>
+            
+            <div class="card">
+                <h3>Ambiente - Gasolio/Benzina</h3>
+                <p>Carica qui le fatture del gasolio o della benzina per autotrazione (esempio furgoni o autovetture).</p>
+                <button class="btn" onclick="elabora('trasporti')">Cartella Drive "TRASPORTI"</button>
+            </div>
+            
+            <div class="card">
+                <h3>Ambiente - Riscaldamento</h3>
+                <p>Carica qui le fatture del metano/GPL per riscaldamento.</p>
+                <button class="btn" onclick="elabora('riscaldamento')">Cartella Drive "RISCALDAMENTO"</button>
+            </div>
+            
+            <div class="card">
+                <h3>Ambiente - Acqua</h3>
+                <p>Carica qui le fatture relative al consumo d'acqua.</p>
+                <button class="btn" onclick="elabora('acqua')">Cartella Drive "ACQUA"</button>
+            </div>
+            
+            <div class="card" style="grid-column: 1 / -1; max-width: 400px; margin: 0 auto;">
+                <h3>Social - Formazione personale</h3>
+                <p>Carica qui le ore di formazione relative al personale.</p>
+                <button class="btn" onclick="elabora('formazione')">Cartella Drive "FORMAZIONE"</button>
+            </div>
+        </div>
+
+        <!-- Form Nascosto per l'invio dati -->
+        <form id="hiddenForm" action="/avvia" method="POST" style="display: none;">
+            <input type="hidden" name="nome_cliente" id="form_cliente">
+            <input type="hidden" name="percorso_root" id="form_percorso">
+            <input type="hidden" name="categoria" id="form_categoria">
         </form>
     </div>
 </body>
@@ -189,57 +232,46 @@ def home():
 @app.route('/avvia', methods=['POST'])
 def avvia_processo():
     nome_cliente = request.form['nome_cliente'].strip()
-    percorso_root = request.form['percorso_root'].strip()
+    percorso = request.form['percorso_root'].strip('"\'').strip()
+    categoria = request.form['categoria'].strip()
     q = queue.Queue()
 
     def background_worker():
         try:
-            if not os.path.exists(percorso_root):
-                q.put(f"ERRORE: La cartella non esiste: {percorso_root}")
+            if not os.path.exists(percorso):
+                q.put(f"ERRORE: La cartella non esiste: {percorso}")
                 q.put(("DONE", None))
                 return
 
-            q.put("Inizializzazione motore di estrazione LOCALE...")
-            config = trova_e_memorizza_cartelle(percorso_root, nome_cliente, q)
+            q.put(f"Inizializzazione estrazione per categoria: {categoria.upper()}")
+            
+            file_paths = [os.path.join(percorso, f) for f in os.listdir(percorso) if f.lower().endswith('.pdf')]
 
-            file_ee_paths = []
-            if config.get("ee") and os.path.exists(config["ee"]):
-                file_ee_paths = [os.path.join(config["ee"], f) for f in os.listdir(config["ee"]) if f.lower().endswith('.pdf')]
-                        
-            file_gas_paths = []
-            if config.get("gas") and os.path.exists(config["gas"]):
-                file_gas_paths = [os.path.join(config["gas"], f) for f in os.listdir(config["gas"]) if f.lower().endswith('.pdf')]
-
-            if not file_ee_paths and not file_gas_paths:
-                q.put("ATTENZIONE: Nessun file PDF trovato.")
+            if not file_paths:
+                q.put("ATTENZIONE: Nessun file PDF trovato in questa cartella.")
                 q.put(("DONE", None))
                 return
 
-            q.put(f"Trovati {len(file_ee_paths)} file Energia Elettrica e {len(file_gas_paths)} file Gas.")
-            q.put("--- Inizio elaborazione istantanea senza server ---")
+            q.put(f"Trovati {len(file_paths)} file. Inizio lettura istantanea...")
 
-            dati_ee = []
-            dati_gas = []
-
-            for p in file_ee_paths:
-                res = estrai_dati_locale(p, "energia elettrica", q)
-                if res: dati_ee.append(res)
-                
-            for p in file_gas_paths:
-                res = estrai_dati_locale(p, "gas", q)
-                if res: dati_gas.append(res)
+            dati_estratti = []
+            for p in file_paths:
+                res = estrai_dati_locale(p, categoria, q)
+                if res: dati_estratti.append(res)
 
             q.put("\n--- Generazione file Excel sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-            nome_file_excel = os.path.join(desktop_path, f"Report_Consumi_{nome_cliente}.xlsx")
+            # Crea un nome file specifico per categoria!
+            nome_file_excel = os.path.join(desktop_path, f"Report_{categoria.capitalize()}_{nome_cliente}.xlsx")
 
             with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
-                if dati_ee: pd.DataFrame(dati_ee).to_excel(writer, sheet_name='Energia_Elettrica', index=False)
-                if dati_gas: pd.DataFrame(dati_gas).to_excel(writer, sheet_name='Gas', index=False)
-                if not dati_ee and not dati_gas:
+                if dati_estratti:
+                    # Rinomina il foglio in base alla categoria
+                    pd.DataFrame(dati_estratti).to_excel(writer, sheet_name=categoria.capitalize(), index=False)
+                else:
                     pd.DataFrame([{"Note": "Nessun dato estratto"}]).to_excel(writer, sheet_name='Vuoto', index=False)
 
-            q.put(f"SUCCESSO: File Excel pronto: {nome_file_excel}")
+            q.put(f"SUCCESSO: File Excel pronto!")
             q.put(("DONE", nome_file_excel))
         except Exception as err:
             import traceback
@@ -253,13 +285,13 @@ def avvia_processo():
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Elaborazione Consumi ESG</title>
+            <title>Elaborazione in corso...</title>
             <style>
                 body {{ font-family: Arial; padding: 40px; background: #f4f6f8; }}
                 .box {{ background: white; padding: 25px; border-radius: 8px; max-width: 800px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }}
-                #log-box {{ background: #1e1e1e; color: #00ff66; padding: 15px; border-radius: 5px; height: 400px; overflow-y: scroll; font-family: monospace; font-size: 0.9em; margin-top: 15px; white-space: pre-wrap; }}
-                h2 {{ color: #2e7d32; text-align: center; margin-top: 0; }}
-                .btn {{ display: inline-block; margin-top: 20px; background: #2e7d32; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold; }}
+                #log-box {{ background: #1e1e1e; color: #00ff66; padding: 15px; border-radius: 5px; height: 350px; overflow-y: scroll; font-family: monospace; font-size: 0.95em; margin-top: 15px; white-space: pre-wrap; }}
+                h2 {{ color: #1a73e8; text-align: center; margin-top: 0; }}
+                .btn {{ display: inline-block; margin-top: 20px; background: #1a73e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold; }}
             </style>
             <script>
                 function appendLog(text) {{
@@ -271,7 +303,7 @@ def avvia_processo():
         </head>
         <body>
             <div class="box">
-                <h2>Elaborazione Consumi ESG <br><small style="color:#666; font-size:0.6em;">Offline & Istantanea</small></h2>
+                <h2>Elaborazione {categoria.replace('_', ' ').title()}</h2>
                 <div id="log-box"></div>
                 <div id="result-area"></div>
             </div>
@@ -284,7 +316,7 @@ def avvia_processo():
             if isinstance(item, tuple) and item[0] == "DONE":
                 file_path = item[1]
                 if file_path:
-                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #2e7d32; text-align:center;\">Processo Completato in 1 Secondo!</h3><p style=\"text-align:center;\">File salvato sul Desktop:<br><b>{file_path}</b></p><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
+                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #2e7d32; text-align:center;\">Processo Completato!</h3><p style=\"text-align:center;\">File generato sul Desktop:<br><b>{file_path}</b></p><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
                 else:
                     yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #c62828; text-align:center;\">Terminato con errori.</h3><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
                 break
