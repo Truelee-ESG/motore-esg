@@ -28,6 +28,35 @@ def analizza_file_comuni(cartella):
                 file_list.append((root_dir, filename))
     return file_list
 
+def analizza_file_trasporti(cartella):
+    if not os.path.exists(cartella):
+        messagebox.showerror("Errore", "La cartella specificata non esiste.")
+        return None
+    
+    valid_extensions = ('.pdf', '.jpg', '.jpeg', '.png')
+    target_keywords = ['gasolio', 'benzina', 'auto', 'trasporti', 'carburante', 'fleet', 'veicoli']
+    
+    file_list = []
+    for root_dir, _, files in os.walk(cartella):
+        # Controlla se il percorso corrente o la cartella padre contiene parole chiave relative ai trasporti
+        path_lower = root_dir.lower()
+        is_target_dir = any(kw in path_lower for kw in target_keywords)
+        
+        for filename in files:
+            if filename.lower().endswith(valid_extensions):
+                # Se ci troviamo in una sottocartella mirata OPPURE se il nome del file contiene parole chiave
+                if is_target_dir or any(kw in filename.lower() for kw in target_keywords):
+                    file_list.append((root_dir, filename))
+                    
+    # Se non trova sottocartelle specifiche, esegue il fallback sull'intera cartella per non bloccare l'estrazione
+    if not file_list:
+        for root_dir, _, files in os.walk(cartella):
+            for filename in files:
+                if filename.lower().endswith(valid_extensions):
+                    file_list.append((root_dir, filename))
+                    
+    return file_list
+
 def estrai_mesi_e_anno(text, text_lower):
     mesi_mappa = {
         'gennaio': 'Gennaio', 'febbraio': 'Febbraio', 'marzo': 'Marzo', 'aprile': 'Aprile',
@@ -142,9 +171,10 @@ def _process_trasporti():
         messagebox.showerror("Errore", "Inserisci il nome dell'azienda e seleziona una cartella valida.")
         return
 
-    file_list = analizza_file_comuni(cartella)
+    # Utilizza la ricerca mirata nelle cartelle di trasporto (Gasolio, Benzina, Auto, Trasporti, ecc.)
+    file_list = analizza_file_trasporti(cartella)
     if not file_list:
-        messagebox.showwarning("Attenzione", "Nessun file valido trovato nella cartella.")
+        messagebox.showwarning("Attenzione", "Nessun file valido trovato nelle cartelle di trasporto.")
         return
 
     total_files = len(file_list)
@@ -184,33 +214,34 @@ def _process_trasporti():
 
             if text:
                 text_lower = text.lower()
-                if any(k in text_lower for k in ["gasolio", "benzina", "diesel", "carburante", "litri", "l", "mc", "smc"]):
-                    periodo, anno = estrai_mesi_e_anno(text, text_lower)
-                    
-                    # Determinazione tipo carburante
-                    if "benzina" in text_lower:
-                        carburante = "Benzina"
-                    elif any(k in text_lower for k in ["gasolio", "diesel"]):
-                        carburante = "Diesel"
+                
+                # Determinazione tipo carburante (controlla anche il percorso della cartella)
+                combined_text = f"{root_dir} {text_lower}"
+                if "benzina" in combined_text:
+                    carburante = "Benzina"
+                elif any(k in combined_text for k in ["gasolio", "diesel"]):
+                    carburante = "Diesel"
 
-                    # 1. Cerca prima con unità esplicita (litri, L, mc, smc)
-                    match_qty_unit = re.search(r'(\d+[\.,]?\d*)\s*(litri|Litri|L|litro|mc|MC|Smc|SMC|smc)', text)
-                    if match_qty_unit:
-                        quantita = match_qty_unit.group(1)
-                        u_raw = match_qty_unit.group(2).lower()
-                        if any(u in u_raw for u in ["mc", "smc"]):
+                periodo, anno = estrai_mesi_e_anno(text, text_lower)
+
+                # 1. Cerca prima con unità esplicita (litri, L, mc, smc)
+                match_qty_unit = re.search(r'(\d+[\.,]?\d*)\s*(litri|Litri|L|litro|mc|MC|Smc|SMC|smc)', text)
+                if match_qty_unit:
+                    quantita = match_qty_unit.group(1)
+                    u_raw = match_qty_unit.group(2).lower()
+                    if any(u in u_raw for u in ["mc", "smc"]):
+                        unita_misura = "Metri cubi"
+                    else:
+                        unita_misura = "Litri"
+                else:
+                    # 2. Cerca sotto la voce "quantità", "q.tà", "q,tà", "qta"
+                    match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,15}(\d+[\.,]?\d*)', text_lower)
+                    if match_label:
+                        quantita = match_label.group(1)
+                        if any(u in text_lower for u in ["mc", "smc", "metri cubi"]):
                             unita_misura = "Metri cubi"
                         else:
                             unita_misura = "Litri"
-                    else:
-                        # 2. Cerca sotto la voce "quantità", "q.tà", "q,tà", "qta"
-                        match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,15}(\d+[\.,]?\d*)', text_lower)
-                        if match_label:
-                            quantita = match_label.group(1)
-                            if any(u in text_lower for u in ["mc", "smc", "metri cubi"]):
-                                unita_misura = "Metri cubi"
-                            else:
-                                unita_misura = "Litri"
 
                 if quantita != "Non rilevato":
                     row_idx = ws.max_row + 1
