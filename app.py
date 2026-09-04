@@ -54,31 +54,30 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
     return config, f"Configurazione salvata in {nome_file_config}"
 
 # ==========================================
-# 2. SELEZIONE MODELLO OTTIMIZZATA (UNA SOLA VOLTA)
+# 2. SELEZIONE MODELLO OTTIMIZZATA
 # ==========================================
 def trova_modello_valido(api_key, q):
     q.put("Connessione a Google AI Studio per trovare il modello attivo...")
-    modelli = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    modelli = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash']
     
     for m in modelli:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
         payload = {"contents": [{"parts": [{"text": "test"}]}]}
         try:
             res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=5)
-            # Se lo status non è 404 (Not Found), il modello esiste ed è utilizzabile
             if res.status_code != 404:
                 q.put(f"-> Modello ottimale agganciato con successo: {m}")
                 return m
         except Exception:
             continue
             
-    q.put("-> Uso modello predefinito di riserva: gemini-3.6-flash")
-    return 'gemini-3.6-flash'
+    q.put("-> Uso modello predefinito di riserva: gemini-2.5-flash")
+    return 'gemini-2.5-flash'
 
 # ==========================================
-# 3. ESTRAZIONE VELOCE DISSOCIATA DAI TEST
+# 3. ESTRAZIONE RESILIENTE CON MULTI-FALLBACK
 # ==========================================
-def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_attivo, q):
+def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, q):
     q.put(f" -> Analisi bolletta: {os.path.basename(percorso_file)}")
     with open(percorso_file, "rb") as doc_file:
         pdf_bytes = doc_file.read()
@@ -91,48 +90,68 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_attivo, q)
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello_attivo}:generateContent?key={api_key}"
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "inline_data": {
-                            "mime_type": "application/pdf",
-                            "data": pdf_base64
-                        }
-                    },
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ]
-    }
-    headers = {"Content-Type": "application/json"}
+    # Lista di modelli da provare in sequenza automatica in caso di sovraccarico
+    modelli_da_provare = [modello_iniziale] + [m for m in ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash'] if m != modello_iniziale]
     
-    tentativi = 3
-    for tentativo in range(tentativi):
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=40)
-            if response.status_code == 200:
-                data_risposta = response.json()
+    ultimo_errore = None
+    
+    for modello in modelli_da_provare:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello}:generateContent?key={api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "application/pdf",
+                                "data": pdf_base64
+                            }
+                        },
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
+        }
+        headers = {"Content-Type": "application/json"}
+        
+        tentativi = 2
+        modello_riuscito = False
+        data_risposta = None
+        
+        for tentativo in range(tentativi):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=45)
+                if response.status_code == 200:
+                    data_risposta = response.json()
+                    modello_riuscito = True
+                    break
+                elif response.status_code in [503, 429]:
+                    q.put(f"    [Avviso] Modello {modello} occupato (503/429). Riprovo ({tentativo+1}/{tentativi})...")
+                    time.sleep(2)
+                    ultimo_errore = response.text
+                    continue
+                else:
+                    ultimo_errore = response.text
+                    break # Passa al prossimo modello se c'è un errore diverso
+            except requests.exceptions.RequestException as e:
+                ultimo_errore = str(e)
+                time.sleep(1)
+                continue
+                
+        if modello_riuscito and data_risposta:
+            try:
                 testo = data_risposta['candidates'][0]['content']['parts'][0]['text']
                 testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
                 return json.loads(testo_pulito)
-            elif response.status_code in [503, 429]:
-                q.put(f"    [Avviso] Server temporaneamente occupati. Riprovo fra pochi secondi ({tentativo+1}/{tentativi})...")
-                time.sleep(3 * (tentativo + 1))
+            except Exception as parse_err:
+                q.put(f"    [Avviso] Errore parsing risposta da {modello}, provo modello alternativo...")
                 continue
-            else:
-                raise Exception(f"HTTP {response.status_code}: {response.text}")
-        except requests.exceptions.RequestException as e:
-            if tentativo == tentativi - 1:
-                raise e
-            time.sleep(2)
-            continue
+        else:
+            q.put(f"    [Info] Modello {modello} non ha risposto, passo al modello di riserva...")
             
-    raise Exception("Superato il numero massimo di tentativi per questo file.")
+    raise Exception(f"Tutti i modelli disponibili hanno fallito l'estrazione per questo file. Ultimo errore: {ultimo_errore}")
 
 def converti_in_kwh(dati):
     try:
@@ -219,13 +238,12 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            # Individuiamo il modello una sola volta prima di iniziare il ciclo dei file
             modello_attivo = trova_modello_valido(chiave_attiva, q)
 
             dati_ee = []
             dati_gas = []
 
-            q.put("--- Inizio analisi bollette PDF alla massima velocità ---")
+            q.put("--- Inizio analisi bollette PDF ---")
             
             cartella_ee = config.get("ee")
             if cartella_ee and os.path.exists(cartella_ee):
