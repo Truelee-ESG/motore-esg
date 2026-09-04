@@ -59,8 +59,8 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    # Lista di modelli testati in sequenza per massima affidabilità
-    modelli = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro']
+    # Lista aggiornata dei modelli moderni di Google in ordine di priorità
+    modelli = ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-2.0-flash']
     ultimo_errore = None
     
     for modello in modelli:
