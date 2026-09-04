@@ -58,7 +58,6 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
 # ==========================================
 def trova_modello_valido(api_key, q):
     q.put("Connessione a Google AI Studio per trovare il modello attivo...")
-    # Priorità ai modelli più stabili e veloci per il piano standard/free
     modelli = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3.6-flash']
     
     for m in modelli:
@@ -76,62 +75,65 @@ def trova_modello_valido(api_key, q):
     return 'gemini-1.5-flash'
 
 # ==========================================
-# 3. ESTRAZIONE SICURA CON GESTIONE DINAMICA DEL RITARDO 429
+# 3. ESTRAZIONE IN BLOCCO (BATCH) ULTRA-VELOCE
 # ==========================================
-def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, q):
-    nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Analisi bolletta: {nome_file}")
+def estrai_dati_in_blocco(file_paths, tipo_bolletta, api_key, modello_attivo, q):
+    if not file_paths:
+        return []
+        
+    q.put(f"\n--- Invio in blocco di {len(file_paths)} file di {tipo_bolletta} a Gemini ---")
     
-    with open(percorso_file, "rb") as doc_file:
-        pdf_bytes = doc_file.read()
-    pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
-    
-    prompt = f"""
-    Leggi questa bolletta di {tipo_bolletta}.
-    Estrai i dati e rispondi SOLO con un oggetto JSON valido con questa struttura:
-    {{"mese": "gennaio", "anno": 2026, "consumo": 120.5, "unita_misura": "sm3", "tipo_gas": "metano"}}
+    parts = []
+    for idx, percorso_file in enumerate(file_paths):
+        nome_file = os.path.basename(percorso_file)
+        q.put(f" Caricamento in memoria: {nome_file}")
+        try:
+            with open(percorso_file, "rb") as doc_file:
+                pdf_bytes = doc_file.read()
+            pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+            
+            parts.append({
+                "inline_data": {
+                    "mime_type": "application/pdf",
+                    "data": pdf_base64
+                }
+            })
+            parts.append({
+                "text": f"[RIFERIMENTO FILE N. {idx+1}: {nome_file}]"
+            })
+        except Exception as e:
+            q.put(f"   [Errore] Impossibile leggere {nome_file}: {str(e)}")
+
+    prompt_cumulativo = f"""
+    Analizza tutte le bollette di {tipo_bolletta} allegate sopra. Ciascuna ha un riferimento testuale con il nome del file.
+    Estrai i dati per OGNI SINGOLA bolletta e restituisci UN UNICO ARRAY JSON valido (e nessun altro testo) con questa struttura per ciascun elemento:
+    [
+      {{"nome_file": "nome_file.pdf", "mese": "gennaio", "anno": 2026, "consumo": 120.5, "unita_misura": "sm3", "tipo_gas": "metano"}}
+    ]
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
+    parts.append({"text": prompt_cumulativo})
     
-    modelli_da_provare = [modello_iniziale] + [m for m in ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3.6-flash'] if m != modello_iniziale]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello_attivo}:generateContent?key={api_key}"
+    payload = {"contents": [{"parts": parts}]}
+    headers = {"Content-Type": "application/json"}
     
-    ultimo_errore = None
+    q.put(f" Invio richiesta cumulativa a Google Gemini (attesa elaborazione)...")
     
-    for modello in modelli_da_provare:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello}:generateContent?key={api_key}"
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "inline_data": {
-                                "mime_type": "application/pdf",
-                                "data": pdf_base64
-                            }
-                        },
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ]
-        }
-        headers = {"Content-Type": "application/json"}
-        
-        tentativi = 3
-        for tentativo in range(tentativi):
-            try:
-                response = requests.post(url, json=payload, headers=headers, timeout=60)
-                if response.status_code == 200:
-                    data_risposta = response.json()
-                    testo = data_risposta['candidates'][0]['content']['parts'][0]['text']
-                    testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
-                    dati = json.loads(testo_pulito)
-                    
-                    # Conversione kWh
-                    consumo = float(dati.get('consumo', 0))
-                    unita = str(dati.get('unita_misura', '')).lower()
-                    tipo_gas = str(dati.get('tipo_gas', '')).lower()
+    for tentativo in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            if response.status_code == 200:
+                data_risposta = response.json()
+                testo = data_risposta['candidates'][0]['content']['parts'][0]['text']
+                testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
+                risultati_lista = json.loads(testo_pulito)
+                
+                dati_finali = []
+                for item in risultati_lista:
+                    consumo = float(item.get('consumo', 0))
+                    unita = str(item.get('unita_misura', '')).lower()
+                    tipo_gas = str(item.get('tipo_gas', '')).lower()
                     
                     if unita == 'kwh':
                         kwh = consumo
@@ -143,44 +145,25 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, 
                             fattore = 7.0
                         kwh = round(consumo * fattore, 2)
                         
-                    dati['consumo_kwh_convertito'] = kwh
-                    q.put(f"   [OK] {nome_file} -> {kwh} kWh")
-                    return dati
+                    item['consumo_kwh_convertito'] = kwh
+                    dati_finali.append(item)
+                    q.put(f"   [OK] Estratto {item.get('nome_file', 'file')} -> {kwh} kWh")
                     
-                elif response.status_code == 429:
-                    # Estraiamo il tempo esatto richiesto da Google dal JSON di errore (RetryInfo)
-                    pausa = 20
-                    try:
-                        err_json = response.json()
-                        details = err_json.get("error", {}).get("details", [])
-                        for d in details:
-                            if "RetryInfo" in d.get("@type", ""):
-                                retry_delay_str = d.get("retryDelay", "20s")
-                                pausa = int(retry_delay_str.replace("s", ""))
-                    except Exception:
-                        pass
-                    
-                    q.put(f"   [Limite Google] Pausa richiesta di {pausa} secondi per rispettare la quota...")
-                    time.sleep(pausa + 2)
-                    ultimo_errore = response.text
-                    continue
-                elif response.status_code == 503:
-                    q.put(f"   [Server Occupati] Riprovo tra 5 secondi...")
-                    time.sleep(5)
-                    ultimo_errore = response.text
-                    continue
-                else:
-                    ultimo_errore = response.text
-                    break # Passa al modello successivo se l'errore è diverso
-            except Exception as e:
-                ultimo_errore = str(e)
-                time.sleep(3)
+                return dati_finali
+            elif response.status_code in [503, 429]:
+                q.put(f"   [Server Occupati] Riprovo tra 10 secondi ({tentativo+1}/3)...")
+                time.sleep(10)
                 continue
-                
-    raise Exception(f"Impossibile elaborare il file {nome_file}. Ultimo errore: {ultimo_errore}")
-
-def converti_in_kwh(dati):
-    return dati.get('consumo_kwh_convertito', 0)
+            else:
+                q.put(f"   [Errore API] Status {response.status_code}: {response.text}")
+                break
+        except Exception as e:
+            q.put(f"   [Errore di rete] {str(e)}. Riprovo...")
+            time.sleep(5)
+            continue
+            
+    q.put(f"   [Errore] Impossibile completare l'elaborazione in blocco per {tipo_bolletta}.")
+    return []
 
 # ==========================================
 # 4. INTERFACCIA WEB (FRONTEND)
@@ -249,9 +232,6 @@ def avvia_processo():
 
             modello_attivo = trova_modello_valido(chiave_attiva, q)
 
-            dati_ee = []
-            dati_gas = []
-
             cartella_ee = config.get("ee")
             file_ee_paths = []
             if cartella_ee and os.path.exists(cartella_ee):
@@ -271,20 +251,11 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            q.put(f"--- Inizio elaborazione di {len(file_ee_paths)} file EE e {len(file_gas_paths)} file Gas ---")
+            q.put(f"Trovati {len(file_ee_paths)} file di Energia Elettrica e {len(file_gas_paths)} file di Gas.")
 
-            # Elaborazione sequenziale fluida con micro-pausa di 4 secondi per rispettare i limiti RPM (15 req/min)
-            for p in file_ee_paths:
-                res = estrai_dati_da_pdf(p, "energia elettrica", chiave_attiva, modello_attivo, q)
-                if res:
-                    dati_ee.append(res)
-                time.sleep(4) # Mantiene la velocità massima senza sforare la quota
-
-            for p in file_gas_paths:
-                res = estrai_dati_da_pdf(p, "gas", chiave_attiva, modello_attivo, q)
-                if res:
-                    dati_gas.append(res)
-                time.sleep(4)
+            # Elaborazione in blocco fulminea
+            dati_ee = estrai_dati_in_blocco(file_ee_paths, "energia elettrica", chiave_attiva, modello_attivo, q)
+            dati_gas = estrai_dati_in_blocco(file_gas_paths, "gas", chiave_attiva, modello_attivo, q)
 
             q.put("--- Generazione file Excel sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -333,7 +304,7 @@ def avvia_processo():
             <div class="box">
                 <h2>Elaborazione Consumi ESG in Corso</h2>
                 <p>Segui l'avanzamento delle operazioni in tempo reale:</p>
-                <div id="log-box">Inizializzazione motore ottimizzato...</div>
+                <div id="log-box">Inizializzazione elaborazione in blocco (Batch)...</div>
                 <div id="result-area"></div>
             </div>
         </body>
