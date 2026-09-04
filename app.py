@@ -19,15 +19,20 @@ def analizza_bollette(azienda, cartella, status_label):
         return
 
     valid_extensions = ('.pdf', '.jpg', '.jpeg', '.png')
+    # Parole chiave per filtrare a monte e saltare istantaneamente i file non pertinenti
+    bill_keywords = ('boll', 'fatt', 'ener', 'luce', 'bill', 'invo', 'elett', 'consum', 'pod', 'fornit')
     
     file_list = []
     for root_dir, _, files in os.walk(cartella):
         for filename in files:
             if filename.lower().endswith(valid_extensions):
-                file_list.append((root_dir, filename))
+                filename_lower = filename.lower()
+                # Seleziona solo i file che contengono almeno una parola chiave utile nel nome
+                if any(kw in filename_lower for kw in bill_keywords):
+                    file_list.append((root_dir, filename))
     
     if not file_list:
-        messagebox.showwarning("Attenzione", "Nessun file valido (.pdf, .jpg, .jpeg, .png) trovato nella cartella o nelle sottocartelle.")
+        messagebox.showwarning("Attenzione", "Nessun file con nome affine a bollette/fatture (.pdf, .jpg, .jpeg, .png) trovato nella cartella.")
         return
 
     wb = openpyxl.Workbook()
@@ -163,11 +168,11 @@ def analizza_bollette(azienda, cartella, status_label):
             pass
             
         success_count += 1
-        status_label.config(text=f"Scansionati ({success_count}/{total_files}) - Validi trovati: {valid_count}")
+        status_label.config(text=f"Analizzati mirati ({success_count}/{total_files}) - Validi trovati: {valid_count}")
         status_label.update()
 
     if valid_count == 0:
-        messagebox.showwarning("Attenzione", "Nessuna bolletta dell'energia elettrica valida è stata trovata nei file analizzati.")
+        messagebox.showwarning("Attenzione", "Nessuna bolletta valida è stata estratta dai file filtrati.")
         return
 
     desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -202,7 +207,7 @@ FONT_FAMILY = "Segoe UI"
 lbl_title = tk.Label(root, text="Analizzatore Bollette Elettriche", font=(FONT_FAMILY, 15, "bold"), bg="#f8fafc", fg="#1e293b")
 lbl_title.pack(anchor="w", padx=28, pady=(24, 2))
 
-lbl_subtitle = tk.Label(root, text="Estrai consumi in kWh ed esporta in Excel in modo semplice", font=(FONT_FAMILY, 9), bg="#f8fafc", fg="#64748b")
+lbl_subtitle = tk.Label(root, text="Estrazione rapida mirata e export in Excel", font=(FONT_FAMILY, 9), bg="#f8fafc", fg="#64748b")
 lbl_subtitle.pack(anchor="w", padx=28, pady=(0, 18))
 
 # Sezione Azienda
