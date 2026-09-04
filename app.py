@@ -5,7 +5,6 @@ import time
 import threading
 import queue
 import webbrowser
-import statistics
 import pandas as pd
 from pypdf import PdfReader
 from flask import Flask, request, render_template_string, Response
@@ -50,7 +49,6 @@ def formatta_numero_italiano(val_str):
         v = v.replace(',', '.') # Es: 1234,56 -> 1234.56
     elif '.' in v:
         parts = v.split('.')
-        # Se ci sono esattamente 3 cifre dopo il punto, in Italia è il separatore delle migliaia (es: 1.500)
         if len(parts[-1]) == 3:
             v = v.replace('.', '')
     return float(v)
@@ -103,23 +101,19 @@ def estrai_dati_locale(percorso_file, categoria, q):
     candidati = []
     unita_misura = "KWH" if categoria == 'energia_elettrica' else "Litri"
     
-    # Cattura qualsiasi potenziale numero nella prima pagina
     matches = re.finditer(r'\b(\d{1,6}(?:[.,]\d{3})*(?:[.,]\d+)?)\b', testo_p1_lower)
     
     for m in matches:
         val_str = m.group(1)
         
-        # Filtra palesemente gli anni solari
         if val_str in ['2022', '2023', '2024', '2025', '2026', '2027']:
             continue
             
         try:
             num = formatta_numero_italiano(val_str)
-            # Tagliamo fuori numeri impossibili da essere consumi su singola bolletta
             if num <= 0 or num > 600000:  
                 continue
                 
-            # Finestra di contesto ristretta attorno al numero (50 caratteri)
             start = max(0, m.start() - 50)
             end = min(len(testo_p1_lower), m.end() + 50)
             contesto = testo_p1_lower[start:end]
@@ -127,16 +121,13 @@ def estrai_dati_locale(percorso_file, categoria, q):
             score = 0
             
             if categoria == 'energia_elettrica':
-                # Punti positivi per le parole classiche dei riepiloghi di prima pagina
                 if 'kwh' in contesto or 'kw/h' in contesto: score += 60
                 if any(w in contesto for w in ['consumo', 'totale', 'fatturat', 'periodo']): score += 50
                 if any(w in contesto for w in ['energia', 'attiva', 'prelevata']): score += 30
                 
-                # Penalità durissime: escludiamo i costi in Euro e i dati del contatore
                 if '€' in contesto or 'euro' in contesto or 'importo' in contesto or 'spesa' in contesto: score -= 150
                 if any(w in contesto for w in ['lettura', 'precedente', 'attuale', 'potenza', 'impegnata', 'disponibile', 'pod', 'cliente', 'codice']): score -= 150
                 
-                # Penalità per le costanti di potenza (es. 3.0, 4.5, 6.0 kW)
                 if num in [3.0, 3.3, 4.5, 6.0, 10.0, 15.0]: score -= 100
                 
             elif categoria == 'trasporti':
@@ -151,20 +142,22 @@ def estrai_dati_locale(percorso_file, categoria, q):
         except:
             continue
             
-    # Gestione candidati per mantenere solo il punteggio massimo per ogni numero distinto
     candidati_unici = {}
     for c in candidati:
         v = c['valore']
         if v not in candidati_unici or c['score'] > candidati_unici[v]:
             candidati_unici[v] = c['score']
             
-    # Ordina dal punteggio più alto
     lista_candidati = [{'valore': k, 'score': v} for k, v in candidati_unici.items()]
     lista_candidati.sort(key=lambda x: x['score'], reverse=True)
     
-    quantita = lista_candidati[0]['valore'] if lista_candidati else 0.0
+    # Selezione del valore: se il primo è zero o non valido, scorre gli altri candidati
+    quantita = 0.0
+    for cand in lista_candidati:
+        if cand['valore'] > 0:
+            quantita = cand['valore']
+            break
 
-    # Rilevamento carburante
     tipo_carburante = ""
     if categoria == 'trasporti':
         if any(w in testo_p1_lower for w in ['gasolio', 'diesel', 'f.o.', 'gas.']):
@@ -174,18 +167,22 @@ def estrai_dati_locale(percorso_file, categoria, q):
         else:
             tipo_carburante = "Non specificato"
 
-    q.put(f"   [OK] Rilevato provvisorio: {quantita} {unita_misura}" + (f" (Score: {lista_candidati[0]['score']})" if lista_candidati else ""))
+    score_rilevato = lista_candidati[0]['score'] if lista_candidati else 0
+    q.put(f"   [OK] Rilevato: {quantita} {unita_misura} (Score: {score_rilevato})")
     
+    # Creazione della formula Excel per il collegamento ipertestuale al file locale
+    percorso_file_uri = percorso_file.replace(os.sep, '/')
+    link_excel = f'=HYPERLINK("{percorso_file_uri}", "{nome_file}")'
+
     risultato = {
-        "nome_file": nome_file,
-        "mese": mese_trovato,
-        "anno": anno_trovato,
-        "quantita": quantita,
-        "unita_misura": unita_misura,
-        "candidati_alternativi": lista_candidati # Utile per il check in Fase 2
+        "Nome File": link_excel,
+        "Mese": mese_trovato,
+        "Anno": anno_trovato,
+        "Quantità": quantita,
+        "Unità di Misura": unita_misura
     }
     if categoria == 'trasporti':
-        risultato["tipo_carburante"] = tipo_carburante
+        risultato["Tipo Carburante"] = tipo_carburante
         
     return risultato
 
@@ -230,7 +227,7 @@ HTML_PAGE = """
 <body>
     <div class="container">
         <div class="box">
-            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Estrazione Consumi Multi-Fornitore</small></h2>
+            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Estrazione Consumi Rapida</small></h2>
             
             <label>Nome Azienda/Cliente (senza spazi):</label>
             <input type="text" id="nome_cliente" placeholder="es. ditta_rossi" required>
@@ -241,7 +238,7 @@ HTML_PAGE = """
             <div class="grid">
                 <div class="card">
                     <h3>Ambiente - Energia Elettrica</h3>
-                    <p style="color: #666; font-size: 0.9em;">Estrai kWh (Analisi mirata su Prima Pagina).</p>
+                    <p style="color: #666; font-size: 0.9em;">Estrai kWh da Prima Pagina con Link diretti.</p>
                     <button class="btn" onclick="avviaEstrazione('energia_elettrica')">Avvia Energia Elettrica</button>
                 </div>
                 
@@ -297,58 +294,20 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            q.put(f"Trovati {len(file_paths)} file PDF. Estrazione in corso (Modalità Pagina 1)...")
+            q.put(f"Trovati {len(file_paths)} file PDF. Estrazione rapida in corso...")
 
             dati_estratti = []
             
-            # --- FASE 1: Scoring su tutti i file (Solo prima pagina) ---
             for p in file_paths:
                 res = estrai_dati_locale(p, categoria, q)
                 if res:
                     dati_estratti.append(res)
 
-            # --- FASE 2: Safe-Check Storico ed Estrazione Alternativa ---
-            valori_validi = [d['quantita'] for d in dati_estratti if d['quantita'] > 0]
-            
-            if len(valori_validi) >= 3:
-                mediana_consumi = statistics.median(valori_validi)
-                # Tolleranza ampia: i consumi possono calare molto o triplicare
-                soglia_min = mediana_consumi * 0.15
-                soglia_max = mediana_consumi * 4.0
-                
-                q.put(f"\n--- FASE 2: Bilanciamento (Mediana Storica: {mediana_consumi:.2f}) ---")
-                
-                for d in dati_estratti:
-                    qta = d['quantita']
-                    
-                    if qta > 0 and (qta < soglia_min or qta > soglia_max):
-                        q.put(f" [!] Mese {d['mese']}: Il valore {qta} risulta anomalo. Scansione alternative in pag 1...")
-                        
-                        sostituito = False
-                        for alt in d.get('candidati_alternativi', []):
-                            alt_val = alt['valore']
-                            alt_score = alt['score']
-                            
-                            # Se l'alternativa ha senso logico ed è vicina alla mediana, sostituiscila
-                            if alt_val != qta and alt_score > 10 and (soglia_min <= alt_val <= soglia_max):
-                                d['quantita'] = alt_val
-                                q.put(f"     -> [CORRETTO] Trovata ottima alternativa nella sintesi: {alt_val}")
-                                sostituito = True
-                                break
-                                
-                        if not sostituito:
-                            q.put(f"     -> [IGNORATO] Nessuna alternativa migliore. Mantengo {qta}.")
-            
-            # Pulizia dizionario
-            for d in dati_estratti:
-                if 'candidati_alternativi' in d:
-                    del d['candidati_alternativi']
-
             # --- ORDINAMENTO CRONOLOGICO ---
             if dati_estratti:
                 df = pd.DataFrame(dati_estratti)
-                df['num_mese'] = df['mese'].map(MESI_ORDINE).fillna(13)
-                df = df.sort_values(by=['anno', 'num_mese']).drop(columns=['num_mese'])
+                df['num_mese'] = df['Mese'].map(MESI_ORDINE).fillna(13)
+                df = df.sort_values(by=['Anno', 'num_mese']).drop(columns=['num_mese'])
                 dati_estratti_ordinati = df.to_dict('records')
             else:
                 dati_estratti_ordinati = []
