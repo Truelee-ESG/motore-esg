@@ -10,14 +10,7 @@ from flask import Flask, request, render_template_string
 app = Flask(__name__)
 
 # ==========================================
-# 1. CONFIGURAZIONE GEMINI
-# ==========================================
-API_KEY = "LA_TUA_API_KEY_QUI"
-if API_KEY != "LA_TUA_API_KEY_QUI":
-    genai.configure(api_key=API_KEY)
-
-# ==========================================
-# 2. LOGICA DI RICERCA CARTELLE
+# 1. LOGICA DI RICERCA CARTELLE
 # ==========================================
 def trova_e_memorizza_cartelle(percorso_root, nome_cliente):
     nome_file_config = f"config_{nome_cliente}.json"
@@ -41,7 +34,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente):
     return cartelle_trovate, f"Nuova scansione effettuata. Percorsi salvati in {nome_file_config}"
 
 # ==========================================
-# 3. LOGICA ESTRAZIONE E CONVERSIONE
+# 2. LOGICA ESTRAZIONE E CONVERSIONE
 # ==========================================
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
     file_caricato = genai.upload_file(percorso_file)
@@ -78,7 +71,7 @@ def converti_in_kwh(dati):
     return round(consumo * fattore, 2)
 
 # ==========================================
-# 4. INTERFACCIA WEB (FRONTEND)
+# 3. INTERFACCIA WEB (FRONTEND)
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -97,6 +90,9 @@ HTML_PAGE = """
     <div class="box">
         <h2>Motore di Estrazione Consumi ESG</h2>
         <form action="/avvia" method="POST">
+            <label>Google AI Studio API Key:</label>
+            <input type="password" name="api_key" placeholder="Incolla qui la tua API Key" required>
+
             <label>Nome Azienda/Cliente (senza spazi):</label>
             <input type="text" name="nome_cliente" placeholder="es. ditta_rossi" required>
             
@@ -116,8 +112,8 @@ def home():
 
 @app.route('/avvia', methods=['POST'])
 def avvia_processo():
-    if API_KEY == "LA_TUA_API_KEY_QUI":
-        return "Errore: Inserisci la tua API Key di Google AI Studio nel codice sorgente.", 400
+    api_key = request.form['api_key']
+    genai.configure(api_key=api_key)
 
     nome_cliente = request.form['nome_cliente']
     percorso_root = request.form['percorso_root']
@@ -165,6 +161,5 @@ def avvia_processo():
     """
 
 if __name__ == '__main__':
-    # Apre automaticamente il browser dopo 1 secondo dall'avvio
     threading.Timer(1.0, lambda: webbrowser.open('http://127.0.0.1:5000')).start()
     app.run(debug=False, port=5000)
