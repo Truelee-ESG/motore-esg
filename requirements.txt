@@ -1,3 +1,5 @@
 pdfplumber
 openpyxl
 pyinstaller
+Pillow
+pytesseract
