@@ -89,7 +89,6 @@ def estrai_dati_locale(percorso_file, categoria, q):
     candidati = []
     unita_misura = "KWH" if categoria == 'energia_elettrica' else "Litri"
     
-    # Pattern esteso per catturare numeri interi o decimali formattati
     matches = re.finditer(r'\b(\d{1,6}(?:[.,]\d{3})*(?:[.,]\d+)?)\b', testo_p1_lower)
     
     for m in matches:
@@ -102,7 +101,6 @@ def estrai_dati_locale(percorso_file, categoria, q):
             if num <= 0 or num > 500000:  
                 continue
                 
-            # Finestra di contesto allargata a 120 caratteri per catturare tabelle riepilogative
             start = max(0, m.start() - 120)
             end = min(len(testo_p1_lower), m.end() + 120)
             contesto = testo_p1_lower[start:end]
@@ -114,7 +112,6 @@ def estrai_dati_locale(percorso_file, categoria, q):
                 if any(w in contesto for w in ['consumo', 'totale', 'fatturat', 'periodo', 'prelevata']): score += 60
                 if any(w in contesto for w in ['energia', 'attiva', 'f1', 'f2', 'f3', 'totali']): score += 40
                 
-                # Penalità severe per importi in euro e dati catastali/tecnici del contatore
                 if any(w in contesto for w in ['€', 'euro', 'importo', 'spesa', 'totale documento', 'totale da pagare']): score -= 200
                 if any(w in contesto for w in ['lettura', 'precedente', 'attuale', 'potenza', 'impegnata', 'disponibile', 'pod', 'cliente', 'codice', 'matricola', 'tensione']): score -= 180
                 if num in [1.5, 3.0, 3.3, 4.5, 6.0, 10.0, 13.2, 15.0, 16.5, 20.0, 30.0]: score -= 150
