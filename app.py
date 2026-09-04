@@ -39,31 +39,39 @@ def trova_cartella_categoria(percorso_root, categoria):
     return candidata
 
 # ==========================================
-# 2. MOTORE DI ESTRAZIONE CHIRURGICO (MIGLIORATO)
+# 2. MOTORE DI ESTRAZIONE CHIRURGICO 
 # ==========================================
-def estrai_dati_locale(percorso_file, categoria, q):
+def estrai_dati_locale(percorso_file, categoria, q, solo_prima_pagina=False):
     nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Analisi documento: {nome_file}")
+    
+    if not solo_prima_pagina:
+        q.put(f" -> Analisi documento: {nome_file}")
     
     testo_completo = ""
+    testo_prima_pagina = ""
+    
     try:
         reader = PdfReader(percorso_file)
-        # Analizziamo l'INTERO documento, i dettagli dei consumi sono spesso in pagina 2 o 3
-        for page in reader.pages:
+        for i, page in enumerate(reader.pages):
             estratto = page.extract_text()
             if estratto:
+                if i == 0:
+                    testo_prima_pagina = estratto
                 testo_completo += estratto + "\n"
     except Exception:
-        q.put(f"   [Errore] Impossibile leggere {nome_file}.")
+        if not solo_prima_pagina:
+            q.put(f"   [Errore] Impossibile leggere {nome_file}.")
         return None
         
-    testo_tot_lower = testo_completo.lower()
+    # Se stiamo verificando un'anomalia, limitiamo la ricerca solo alla prima pagina
+    testo_ricerca = testo_prima_pagina.lower() if solo_prima_pagina else testo_completo.lower()
     
-    # Rilevamento Mese e Anno
+    # Rilevamento Mese e Anno (sempre sull'intero testo)
     mesi = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 
             'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre']
     mese_trovato = "Gennaio"
     anno_trovato = 2026
+    testo_tot_lower = testo_completo.lower()
     
     for m in mesi:
         if m in nome_file.lower():
@@ -84,14 +92,12 @@ def estrai_dati_locale(percorso_file, categoria, q):
         if match_anno_testo:
             anno_trovato = int(match_anno_testo.group(1))
 
-    # Algoritmo di estrazione migliorato
+    # Algoritmo di estrazione
     quantita = 0.0
     unita_misura = ""
 
     if categoria == 'energia_elettrica':
         unita_misura = "KWH"
-        # Cerca esplicitamente "kwh" vicino al numero per escludere prezzi e codici.
-        # Negative lookbehind (?<!€\s) per assicurarsi che non ci sia il simbolo dell'Euro prima del numero.
         patterns = [
             r"(?:consumo|energia attiva|prelevata|totale|fatturat)[\s\S]{0,60}?(?<!€\s)(?<!€)\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b\s*kwh",
             r"\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b\s*kwh",
@@ -109,25 +115,19 @@ def estrai_dati_locale(percorso_file, categoria, q):
 
     trovato = False
     for pat in patterns:
-        matches = re.findall(pat, testo_tot_lower)
+        matches = re.findall(pat, testo_ricerca)
         if matches:
             for val_str in matches:
                 if isinstance(val_str, tuple):
                     val_str = val_str[0]
                 
-                # Gestione robusta dei decimali: formato italiano vs inglese
                 if '.' in val_str and ',' not in val_str:
-                    val_clean = val_str # Esempio: 1234.56
+                    val_clean = val_str
                 else:
-                    # Rimuove i punti delle migliaia e trasforma la virgola in punto decimale
                     val_clean = val_str.replace('.', '').replace(',', '.')
                     
                 try:
                     num = float(val_clean)
-                    # Filtri logici stringenti:
-                    # - Maggiore di 0
-                    # - Minore di 1 milione (esclude POD, Partite IVA, codici cliente)
-                    # - Diverso dagli anni correnti per evitare di pescare "2023", "2024" come consumi
                     if 0 < num < 1000000 and num not in [2022, 2023, 2024, 2025, 2026]:
                         quantita = num
                         trovato = True
@@ -136,8 +136,6 @@ def estrai_dati_locale(percorso_file, categoria, q):
                     continue
             if trovato:
                 break
-
-    # Se non trova nulla con i pattern forti, mantiene quantita a 0 (sarà segnalato nel report)
 
     # Rilevamento Carburante per Trasporti
     tipo_carburante = ""
@@ -149,7 +147,8 @@ def estrai_dati_locale(percorso_file, categoria, q):
         else:
             tipo_carburante = "Non specificato"
 
-    q.put(f"   [OK] Consumo rilevato: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
+    if not solo_prima_pagina:
+        q.put(f"   [OK] Rilevato: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
     
     risultato = {
         "nome_file": nome_file,
@@ -164,7 +163,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
     return risultato
 
 # ==========================================
-# 3. INTERFACCIA WEB (INVARIATA)
+# 3. INTERFACCIA WEB E RUNNER
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -215,13 +214,13 @@ HTML_PAGE = """
             <div class="grid">
                 <div class="card">
                     <h3>Ambiente - Energia Elettrica</h3>
-                    <p style="color: #666; font-size: 0.9em;">Estrai solo i kWh di consumo dalla prima pagina.</p>
+                    <p style="color: #666; font-size: 0.9em;">Estrai i kWh di consumo con verifica anomalie.</p>
                     <button class="btn" onclick="avviaEstrazione('energia_elettrica')">Avvia Energia Elettrica</button>
                 </div>
                 
                 <div class="card">
                     <h3>Ambiente - Trasporti</h3>
-                    <p style="color: #666; font-size: 0.9em;">Estrai litri e tipo carburante dalla prima pagina.</p>
+                    <p style="color: #666; font-size: 0.9em;">Estrai litri e tipo carburante.</p>
                     <button class="btn" onclick="avviaEstrazione('trasporti')">Avvia Trasporti</button>
                 </div>
             </div>
@@ -274,12 +273,44 @@ def avvia_processo():
             q.put(f"Trovati {len(file_paths)} file PDF. Estrazione in corso...")
 
             dati_estratti = []
+            
+            # --- FASE 1: Estrazione Base ---
             for p in file_paths:
-                res = estrai_dati_locale(p, categoria, q)
+                res = estrai_dati_locale(p, categoria, q, solo_prima_pagina=False)
                 if res:
+                    res['percorso_file_temp'] = p # Salvataggio temporaneo del percorso
                     dati_estratti.append(res)
 
-            # ORDINAMENTO CRONOLOGICO (Gennaio -> Dicembre)
+            # --- FASE 2: Controllo Anomalie rispetto alla media ---
+            valori_validi = [d['quantita'] for d in dati_estratti if d['quantita'] > 0]
+            if len(valori_validi) >= 2:
+                media_consumi = sum(valori_validi) / len(valori_validi)
+                # Definiamo cosa è un'anomalia (es: < 30% della media o > 300% della media)
+                soglia_min = media_consumi * 0.3
+                soglia_max = media_consumi * 3.0
+                
+                q.put(f"\n--- FASE 2: Controllo Anomalie (Media: {media_consumi:.2f}) ---")
+                
+                for d in dati_estratti:
+                    qta = d['quantita']
+                    if qta > 0 and (qta < soglia_min or qta > soglia_max):
+                        q.put(f" [!] Anomalia {d['mese']}: {qta} è anomalo. Ricerca mirata solo su pagina 1...")
+                        
+                        # Riesegue l'algoritmo bloccando la lettura solo alla prima pagina
+                        res_fix = estrai_dati_locale(d['percorso_file_temp'], categoria, q, solo_prima_pagina=True)
+                        
+                        if res_fix and res_fix['quantita'] > 0:
+                            d['quantita'] = res_fix['quantita']
+                            q.put(f"     -> [CORRETTO] Nuovo valore aggiornato: {res_fix['quantita']}")
+                        else:
+                            q.put(f"     -> Nessun valore migliore trovato sulla prima pagina.")
+            
+            # Rimuove la chiave temporanea
+            for d in dati_estratti:
+                if 'percorso_file_temp' in d:
+                    del d['percorso_file_temp']
+
+            # --- ORDINAMENTO CRONOLOGICO ---
             if dati_estratti:
                 df = pd.DataFrame(dati_estratti)
                 df['num_mese'] = df['mese'].map(MESI_ORDINE).fillna(13)
