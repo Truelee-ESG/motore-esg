@@ -1,16 +1,17 @@
 import os
 import json
 import time
+import threading
+import webbrowser
 import pandas as pd
 import google.generativeai as genai
-from flask import Flask, request, render_template_string, send_file
+from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
 
 # ==========================================
 # 1. CONFIGURAZIONE GEMINI
 # ==========================================
-# INSERISCI QUI LA TUA API KEY DI GOOGLE AI STUDIO
 API_KEY = "LA_TUA_API_KEY_QUI"
 if API_KEY != "LA_TUA_API_KEY_QUI":
     genai.configure(api_key=API_KEY)
@@ -43,10 +44,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente):
 # 3. LOGICA ESTRAZIONE E CONVERSIONE
 # ==========================================
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
-    """Chiama Gemini per estrarre i dati in formato JSON"""
-    print(f"Elaborazione: {percorso_file}")
     file_caricato = genai.upload_file(percorso_file)
-    
     while file_caricato.state.name == 'PROCESSING':
         time.sleep(2)
         file_caricato = genai.get_file(file_caricato.name)
@@ -58,7 +56,6 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
     {{"mese": "gennaio", "anno": 2026, "consumo": 120.5, "unita_misura": "sm3", "tipo_gas": "metano"}}
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
-    
     response = model.generate_content([prompt, file_caricato])
     genai.delete_file(file_caricato.name) 
     testo_pulito = response.text.strip().replace('```json', '').replace('```', '')
@@ -74,7 +71,7 @@ def converti_in_kwh(dati):
         
     fattore = 1.0
     if 'metano' in tipo_gas and unita in ['sm3', 'm3']:
-        fattore = 10.5  # Dato modificabile in base ai parametri ISPRA o GHG Protocol
+        fattore = 10.5  
     elif 'gpl' in tipo_gas and unita == 'litri':
         fattore = 7.0
         
@@ -90,9 +87,10 @@ HTML_PAGE = """
     <title>Setup Iniziale Estrazione Consumi</title>
     <style>
         body { font-family: Arial; padding: 40px; background: #f4f6f8; }
-        .box { background: white; padding: 20px; border-radius: 8px; max-width: 500px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .box { background: white; padding: 20px; border-radius: 8px; max-width: 500px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }
         input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; }
-        button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; }
+        h2 { color: #1a73e8; text-align: center; }
     </style>
 </head>
 <body>
@@ -124,13 +122,11 @@ def avvia_processo():
     nome_cliente = request.form['nome_cliente']
     percorso_root = request.form['percorso_root']
     
-    # 1. Trova le cartelle
     cartelle, msg_ricerca = trova_e_memorizza_cartelle(percorso_root, nome_cliente)
     
     dati_ee = []
     dati_gas = []
 
-    # 2. Estrae dai PDF Trovati
     try:
         if cartelle["ee"] and os.path.exists(cartelle["ee"]):
             for f in os.listdir(cartelle["ee"]):
@@ -148,24 +144,27 @@ def avvia_processo():
     except Exception as e:
         return f"Errore durante l'elaborazione con Gemini: {str(e)}", 500
 
-    # 3. Crea il report Excel
     nome_file_excel = f"Report_Consumi_{nome_cliente}.xlsx"
     with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
         if dati_ee:
             pd.DataFrame(dati_ee).to_excel(writer, sheet_name='Energia_Elettrica', index=False)
         if dati_gas:
             pd.DataFrame(dati_gas).to_excel(writer, sheet_name='Gas', index=False)
-        # Se non ci sono dati, crea un foglio vuoto per evitare errori
         if not dati_ee and not dati_gas:
             pd.DataFrame([{"Note": "Nessun dato trovato"}]).to_excel(writer, sheet_name='Vuoto', index=False)
 
     return f"""
-    <h3>Processo Completato!</h3>
-    <p>{msg_ricerca}</p>
-    <p>Documenti analizzati e convertiti in kWh.</p>
-    <p>File generato: <b>{nome_file_excel}</b> (salvato nella cartella del programma Python).</p>
-    <a href="/">Torna alla home</a>
+    <div style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto;">
+        <h3 style="color: #2e7d32;">Processo Completato con Successo!</h3>
+        <p>{msg_ricerca}</p>
+        <p>Documenti analizzati e convertiti in kWh.</p>
+        <p>File Excel generato: <b>{nome_file_excel}</b></p>
+        <br>
+        <a href="/" style="background: #1a73e8; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">Torna alla home</a>
+    </div>
     """
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Apre automaticamente il browser dopo 1 secondo dall'avvio
+    threading.Timer(1.0, lambda: webbrowser.open('http://127.0.0.1:5000')).start()
+    app.run(debug=False, port=5000)
