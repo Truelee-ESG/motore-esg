@@ -2,8 +2,7 @@ name: Build Windows Executable
 
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch:
+    branches: [ main ]
 
 jobs:
   build:
@@ -21,14 +20,14 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install pdfplumber openpyxl Pillow pytesseract pyinstaller
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --noconsole --onefile --name="EstraiBollette" app.py
+        pyinstaller --noconfirm --onedir --windowed --name "MotoreESG" app.py
 
-    - name: Upload Executable
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: App-Bollette-Windows
-        path: dist/EstraiBollette.exe
+        name: MotoreESG-Windows
+        path: dist/
