@@ -54,11 +54,12 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
     return config, f"Configurazione salvata in {nome_file_config}"
 
 # ==========================================
-# 2. SELEZIONE MODELLO OTTIMIZZATA
+# 2. SELEZIONE MODELLO OTTIMIZZATO
 # ==========================================
 def trova_modello_valido(api_key, q):
     q.put("Connessione a Google AI Studio per trovare il modello attivo...")
-    modelli = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash']
+    # Priorità ai modelli più stabili e veloci per il piano standard/free
+    modelli = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3.6-flash']
     
     for m in modelli:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
@@ -71,11 +72,11 @@ def trova_modello_valido(api_key, q):
         except Exception:
             continue
             
-    q.put("-> Uso modello predefinito di riserva: gemini-2.5-flash")
-    return 'gemini-2.5-flash'
+    q.put("-> Uso modello predefinito di riserva: gemini-1.5-flash")
+    return 'gemini-1.5-flash'
 
 # ==========================================
-# 3. ESTRAZIONE SEQUENZIALE SICURA CON GESTIONE QUOTA 429
+# 3. ESTRAZIONE SICURA CON GESTIONE DINAMICA DEL RITARDO 429
 # ==========================================
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, q):
     nome_file = os.path.basename(percorso_file)
@@ -92,7 +93,7 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, 
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    modelli_da_provare = [modello_iniziale] + [m for m in ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash'] if m != modello_iniziale]
+    modelli_da_provare = [modello_iniziale] + [m for m in ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-3.6-flash'] if m != modello_iniziale]
     
     ultimo_errore = None
     
@@ -117,7 +118,7 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, 
         }
         headers = {"Content-Type": "application/json"}
         
-        tentativi = 4
+        tentativi = 3
         for tentativo in range(tentativi):
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -147,9 +148,20 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_iniziale, 
                     return dati
                     
                 elif response.status_code == 429:
-                    # Raggiunto il limite di richieste di Google: leggiamo il tempo di attesa o usiamo 25 secondi di pausa
-                    q.put(f"   [Quota Superata] Google richiede una pausa. Attendo 25 secondi prima di riprovare...")
-                    time.sleep(25)
+                    # Estraiamo il tempo esatto richiesto da Google dal JSON di errore (RetryInfo)
+                    pausa = 20
+                    try:
+                        err_json = response.json()
+                        details = err_json.get("error", {}).get("details", [])
+                        for d in details:
+                            if "RetryInfo" in d.get("@type", ""):
+                                retry_delay_str = d.get("retryDelay", "20s")
+                                pausa = int(retry_delay_str.replace("s", ""))
+                    except Exception:
+                        pass
+                    
+                    q.put(f"   [Limite Google] Pausa richiesta di {pausa} secondi per rispettare la quota...")
+                    time.sleep(pausa + 2)
                     ultimo_errore = response.text
                     continue
                 elif response.status_code == 503:
@@ -261,18 +273,18 @@ def avvia_processo():
 
             q.put(f"--- Inizio elaborazione di {len(file_ee_paths)} file EE e {len(file_gas_paths)} file Gas ---")
 
-            # Elaborazione sequenziale con pausa di sicurezza anti-sovraccarico (anti-429) tra un file e l'altro
+            # Elaborazione sequenziale fluida con micro-pausa di 4 secondi per rispettare i limiti RPM (15 req/min)
             for p in file_ee_paths:
                 res = estrai_dati_da_pdf(p, "energia elettrica", chiave_attiva, modello_attivo, q)
                 if res:
                     dati_ee.append(res)
-                time.sleep(3) # Pausa di cortesia per rispettare i limiti di Google
+                time.sleep(4) # Mantiene la velocità massima senza sforare la quota
 
             for p in file_gas_paths:
                 res = estrai_dati_da_pdf(p, "gas", chiave_attiva, modello_attivo, q)
                 if res:
                     dati_gas.append(res)
-                time.sleep(3) # Pausa di cortesia per rispettare i limiti di Google
+                time.sleep(4)
 
             q.put("--- Generazione file Excel sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -321,7 +333,7 @@ def avvia_processo():
             <div class="box">
                 <h2>Elaborazione Consumi ESG in Corso</h2>
                 <p>Segui l'avanzamento delle operazioni in tempo reale:</p>
-                <div id="log-box">Inizializzazione motore sicuro...</div>
+                <div id="log-box">Inizializzazione motore ottimizzato...</div>
                 <div id="result-area"></div>
             </div>
         </body>
