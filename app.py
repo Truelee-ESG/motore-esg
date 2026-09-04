@@ -10,16 +10,24 @@ from flask import Flask, request, render_template_string
 app = Flask(__name__)
 
 # ==========================================
-# 1. LOGICA DI RICERCA CARTELLE
+# 1. LOGICA DI RICERCA CARTELLE E CONFIGURAZIONE
 # ==========================================
-def trova_e_memorizza_cartelle(percorso_root, nome_cliente):
+def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
     nome_file_config = f"config_{nome_cliente}.json"
     
+    # Se la configurazione esiste già, la carichiamo (mantenendo anche la chiave salvata)
     if os.path.exists(nome_file_config):
         with open(nome_file_config, 'r') as f:
-            return json.load(f), f"Configurazione caricata da {nome_file_config}"
+            config = json.load(f)
+            # Se l'utente ha inserito una nuova chiave, la aggiorniamo nel file
+            if api_key_inserita:
+                config['api_key'] = api_key_inserita
+                with open(nome_file_config, 'w') as fw:
+                    json.dump(config, fw, indent=4)
+            return config, f"Configurazione e credenziali caricate da {nome_file_config}"
 
-    cartelle_trovate = {"ee": None, "gas": None}
+    # Prima esecuzione: cerchiamo le cartelle e salviamo tutto
+    cartelle_trovate = {"ee": None, "gas": None, "api_key": api_key_inserita}
     for root, dirs, files in os.walk(percorso_root):
         for directory in dirs:
             nome_dir = directory.lower()
@@ -31,7 +39,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente):
     with open(nome_file_config, 'w') as f:
         json.dump(cartelle_trovate, f, indent=4)
         
-    return cartelle_trovate, f"Nuova scansione effettuata. Percorsi salvati in {nome_file_config}"
+    return cartelle_trovate, f"Nuova scansione effettuata. Percorsi e chiave salvati in {nome_file_config}"
 
 # ==========================================
 # 2. LOGICA ESTRAZIONE E CONVERSIONE
@@ -80,24 +88,26 @@ HTML_PAGE = """
     <title>Setup Iniziale Estrazione Consumi</title>
     <style>
         body { font-family: Arial; padding: 40px; background: #f4f6f8; }
-        .box { background: white; padding: 20px; border-radius: 8px; max-width: 500px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }
-        input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; }
-        button { padding: 10px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; }
-        h2 { color: #1a73e8; text-align: center; }
+        .box { background: white; padding: 25px; border-radius: 8px; max-width: 500px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin: 0 auto; }
+        input { width: 100%; padding: 10px; margin: 8px 0 16px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 12px 20px; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; }
+        button:hover { background: #1557b0; }
+        h2 { color: #1a73e8; text-align: center; margin-top: 0; }
+        label { font-weight: bold; font-size: 0.9em; color: #333; }
     </style>
 </head>
 <body>
     <div class="box">
         <h2>Motore di Estrazione Consumi ESG</h2>
         <form action="/avvia" method="POST">
-            <label>Google AI Studio API Key:</label>
-            <input type="password" name="api_key" placeholder="Incolla qui la tua API Key" required>
-
             <label>Nome Azienda/Cliente (senza spazi):</label>
             <input type="text" name="nome_cliente" placeholder="es. ditta_rossi" required>
             
             <label>Percorso Server/Cartella Principale (Root):</label>
             <input type="text" name="percorso_root" placeholder="es. C:\\Archivio_Dati" required>
+
+            <label>Google AI Studio API Key (Password):</label>
+            <input type="password" name="api_key" placeholder="Incolla qui la tua chiave API (richiesta la 1° volta)" required>
             
             <button type="submit">Avvia Ricerca ed Estrazione</button>
         </form>
@@ -112,34 +122,42 @@ def home():
 
 @app.route('/avvia', methods=['POST'])
 def avvia_processo():
-    api_key = request.form['api_key']
-    genai.configure(api_key=api_key)
-
     nome_cliente = request.form['nome_cliente']
     percorso_root = request.form['percorso_root']
+    api_key_inserita = request.form['api_key']
     
-    cartelle, msg_ricerca = trova_e_memorizza_cartelle(percorso_root, nome_cliente)
+    # 1. Recupera o memorizza percorsi e chiave
+    config, msg_ricerca = trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita)
     
+    # Configura Gemini con la chiave associata a questa azienda
+    chiave_attiva = config.get('api_key')
+    if not chiave_attiva:
+        return "Errore: API Key mancante. Inserisci la chiave nella schermata precedente.", 400
+    
+    genai.configure(api_key=chiave_attiva)
+
     dati_ee = []
     dati_gas = []
 
+    # 2. Estrazione dai PDF trovati
     try:
-        if cartelle["ee"] and os.path.exists(cartelle["ee"]):
-            for f in os.listdir(cartelle["ee"]):
+        if config.get("ee") and os.path.exists(config["ee"]):
+            for f in os.listdir(config["ee"]):
                 if f.lower().endswith('.pdf'):
-                    dati = estrai_dati_da_pdf(os.path.join(cartelle["ee"], f), "energia elettrica")
+                    dati = estrai_dati_da_pdf(os.path.join(config["ee"], f), "energia elettrica")
                     dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                     dati_ee.append(dati)
                     
-        if cartelle["gas"] and os.path.exists(cartelle["gas"]):
-            for f in os.listdir(cartelle["gas"]):
+        if config.get("gas") and os.path.exists(config["gas"]):
+            for f in os.listdir(config["gas"]):
                 if f.lower().endswith('.pdf'):
-                    dati = estrai_dati_da_pdf(os.path.join(cartelle["gas"], f), "gas")
+                    dati = estrai_dati_da_pdf(os.path.join(config["gas"], f), "gas")
                     dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                     dati_gas.append(dati)
     except Exception as e:
-        return f"Errore durante l'elaborazione con Gemini: {str(e)}", 500
+        return f"Errore durante l'elaborazione con Gemini (verifica che la chiave API sia corretta): {str(e)}", 500
 
+    # 3. Creazione del report Excel
     nome_file_excel = f"Report_Consumi_{nome_cliente}.xlsx"
     with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
         if dati_ee:
@@ -150,13 +168,13 @@ def avvia_processo():
             pd.DataFrame([{"Note": "Nessun dato trovato"}]).to_excel(writer, sheet_name='Vuoto', index=False)
 
     return f"""
-    <div style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto;">
-        <h3 style="color: #2e7d32;">Processo Completato con Successo!</h3>
-        <p>{msg_ricerca}</p>
-        <p>Documenti analizzati e convertiti in kWh.</p>
-        <p>File Excel generato: <b>{nome_file_excel}</b></p>
+    <div style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto; text-align: center;">
+        <h3 style="color: #2e7d32; font-size: 1.5em;">Processo Completato con Successo!</h3>
+        <p style="color: #555;">{msg_ricerca}</p>
+        <p style="color: #555;">Documenti analizzati e convertiti in kWh.</p>
+        <p style="font-size: 1.1em;">File Excel generato: <b>{nome_file_excel}</b></p>
         <br>
-        <a href="/" style="background: #1a73e8; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;">Torna alla home</a>
+        <a href="/" style="background: #1a73e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Torna alla home</a>
     </div>
     """
 
