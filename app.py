@@ -14,13 +14,10 @@ app = Flask(__name__)
 # ==========================================
 def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
     nome_file_config = f"config_{nome_cliente}.json"
-    
-    # Pulizia del percorso da spazi accidentali
     percorso_root = percorso_root.strip('"\'')
     
     config = {"ee": None, "gas": None, "api_key": api_key_inserita}
     
-    # Se esiste già una configurazione, la carichiamo
     if os.path.exists(nome_file_config):
         try:
             with open(nome_file_config, 'r') as f:
@@ -28,11 +25,9 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
         except Exception:
             pass
 
-    # Aggiorniamo la chiave API se l'utente l'ha inserita ora
     if api_key_inserita:
         config['api_key'] = api_key_inserita
 
-    # Se mancano i percorsi delle cartelle, li cerchiamo
     if not config.get("ee") or not config.get("gas") or not os.path.exists(config.get("ee", "")):
         for root, dirs, files in os.walk(percorso_root):
             for directory in dirs:
@@ -42,7 +37,6 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
                 elif "gas" in nome_dir or "metano" in nome_dir:
                     config["gas"] = os.path.join(root, directory)
 
-    # Salviamo tutto nel file di configurazione
     with open(nome_file_config, 'w') as f:
         json.dump(config, f, indent=4)
         
@@ -133,7 +127,6 @@ def avvia_processo():
     percorso_root = request.form['percorso_root'].strip()
     api_key_inserita = request.form['api_key'].strip()
     
-    # 1. Recupera o memorizza percorsi e chiave
     config, msg_ricerca = trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita)
     
     chiave_attiva = config.get('api_key')
@@ -145,7 +138,6 @@ def avvia_processo():
     dati_ee = []
     dati_gas = []
 
-    # 2. Estrazione dai PDF trovati
     try:
         cartella_ee = config.get("ee")
         if cartella_ee and os.path.exists(cartella_ee):
@@ -166,9 +158,15 @@ def avvia_processo():
                     dati_gas.append(dati)
                     
     except Exception as e:
-        return f"<h3>Errore durante l'elaborazione con Gemini:</h3><p>{str(e)}</p><p>Verifica che la chiave API inserita sia corretta e attiva.</p>", 500
+        # Stampiamo l'errore tecnico esatto sullo schermo per diagnosticarlo
+        return f"""
+        <div style="font-family: Arial; padding: 20px; max-width: 700px; margin: 0 auto; background: #fff3f3; border: 1px solid #ffcdd2; border-radius: 4px;">
+            <h3 style="color: #c62828;">Errore Tecnico Rilevato:</h3>
+            <p style="font-family: monospace; background: #fff; padding: 10px; border: 1px solid #ddd; word-break: break-all;">{str(e)}</p>
+            <br><a href="/">Torna indietro</a>
+        </div>
+        """, 500
 
-    # 3. Creazione del report Excel
     nome_file_excel = f"Report_Consumi_{nome_cliente}.xlsx"
     with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
         if dati_ee:
