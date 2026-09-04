@@ -36,7 +36,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
         config['api_key'] = api_key_inserita
 
     if not config.get("ee") or not config.get("gas") or not os.path.exists(str(config.get("ee", ""))):
-        q.put("Scansione delle cartelle in corso (potrebbe richiedere qualche secondo)...")
+        q.put("Scansione delle cartelle in corso...")
         for root, dirs, files in os.walk(percorso_root):
             for directory in dirs:
                 nome_dir = directory.lower()
@@ -54,10 +54,32 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita, q)
     return config, f"Configurazione salvata in {nome_file_config}"
 
 # ==========================================
-# 2. LOGICA ESTRAZIONE TRAMITE REST API
+# 2. SELEZIONE MODELLO OTTIMIZZATA (UNA SOLA VOLTA)
 # ==========================================
-def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, q):
-    q.put(f" -> Lettura file PDF: {os.path.basename(percorso_file)}")
+def trova_modello_valido(api_key, q):
+    q.put("Connessione a Google AI Studio per trovare il modello attivo...")
+    modelli = ['gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    
+    for m in modelli:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+        payload = {"contents": [{"parts": [{"text": "test"}]}]}
+        try:
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=5)
+            # Se lo status non è 404 (Not Found), il modello esiste ed è utilizzabile
+            if res.status_code != 404:
+                q.put(f"-> Modello ottimale agganciato con successo: {m}")
+                return m
+        except Exception:
+            continue
+            
+    q.put("-> Uso modello predefinito di riserva: gemini-3.6-flash")
+    return 'gemini-3.6-flash'
+
+# ==========================================
+# 3. ESTRAZIONE VELOCE DISSOCIATA DAI TEST
+# ==========================================
+def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, modello_attivo, q):
+    q.put(f" -> Analisi bolletta: {os.path.basename(percorso_file)}")
     with open(percorso_file, "rb") as doc_file:
         pdf_bytes = doc_file.read()
     pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
@@ -69,70 +91,48 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key, q):
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    modelli = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.7-flash', 'gemini-3.6-flash']
-    ultimo_errore = None
-    
-    for modello in modelli:
-        q.put(f"    Invio a Google Gemini (Modello: {modello}) ...")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello}:generateContent?key={api_key}"
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "inline_data": {
-                                "mime_type": "application/pdf",
-                                "data": pdf_base64
-                            }
-                        },
-                        {
-                            "text": prompt
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modello_attivo}:generateContent?key={api_key}"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": "application/pdf",
+                            "data": pdf_base64
                         }
-                    ]
-                }
-            ]
-        }
-        headers = {"Content-Type": "application/json"}
-        
-        tentativi = 3
-        successo = False
-        data_risposta = None
-        
-        for tentativo in range(tentativi):
-            try:
-                response = requests.post(url, json=payload, headers=headers, timeout=40)
-                if response.status_code == 200:
-                    data_risposta = response.json()
-                    successo = True
-                    q.put(f"    [OK] Risposta ricevuta da {modello}.")
-                    break
-                elif response.status_code in [503, 429]:
-                    q.put(f"    [Avviso] Server occupati (503/429). Tentativo {tentativo+1} di {tentativi}...")
-                    time.sleep(3 * (tentativo + 1))
-                    ultimo_errore = response.text
-                    continue
-                else:
-                    ultimo_errore = response.text
-                    if "404" in str(response.status_code) or "NotFound" in response.text:
-                        q.put(f"    [Info] Modello {modello} non disponibile, provo il successivo...")
-                        break
-                    else:
-                        raise Exception(f"HTTP {response.status_code}: {response.text}")
-            except requests.exceptions.RequestException as e:
-                ultimo_errore = str(e)
-                q.put(f"    [Errore di rete] Riprovo... ({str(e)})")
-                time.sleep(2)
-                continue
-                
-        if successo and data_risposta:
-            try:
+                    },
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+    headers = {"Content-Type": "application/json"}
+    
+    tentativi = 3
+    for tentativo in range(tentativi):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=40)
+            if response.status_code == 200:
+                data_risposta = response.json()
                 testo = data_risposta['candidates'][0]['content']['parts'][0]['text']
                 testo_pulito = testo.strip().replace('```json', '').replace('```', '').strip()
                 return json.loads(testo_pulito)
-            except Exception as parse_err:
-                raise Exception(f"Errore nella decodifica JSON: {str(parse_err)}")
-                
-    raise Exception(f"Tutti i tentativi falliti. Ultimo errore: {ultimo_errore}")
+            elif response.status_code in [503, 429]:
+                q.put(f"    [Avviso] Server temporaneamente occupati. Riprovo fra pochi secondi ({tentativo+1}/{tentativi})...")
+                time.sleep(3 * (tentativo + 1))
+                continue
+            else:
+                raise Exception(f"HTTP {response.status_code}: {response.text}")
+        except requests.exceptions.RequestException as e:
+            if tentativo == tentativi - 1:
+                raise e
+            time.sleep(2)
+            continue
+            
+    raise Exception("Superato il numero massimo di tentativi per questo file.")
 
 def converti_in_kwh(dati):
     try:
@@ -155,7 +155,7 @@ def converti_in_kwh(dati):
     return round(consumo * fattore, 2)
 
 # ==========================================
-# 3. INTERFACCIA WEB (FRONTEND)
+# 4. INTERFACCIA WEB (FRONTEND)
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -219,32 +219,35 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
+            # Individuiamo il modello una sola volta prima di iniziare il ciclo dei file
+            modello_attivo = trova_modello_valido(chiave_attiva, q)
+
             dati_ee = []
             dati_gas = []
 
-            q.put("--- Inizio analisi bollette PDF ---")
+            q.put("--- Inizio analisi bollette PDF alla massima velocità ---")
             
             cartella_ee = config.get("ee")
             if cartella_ee and os.path.exists(cartella_ee):
-                q.put(f"Scansione file PDF nella cartella Energia Elettrica: {cartella_ee}")
+                q.put(f"Scansione file PDF in Energia Elettrica: {cartella_ee}")
                 for f in os.listdir(cartella_ee):
                     if f.lower().endswith('.pdf'):
                         percorso_pdf = os.path.join(cartella_ee, f)
-                        dati = estrai_dati_da_pdf(percorso_pdf, "energia elettrica", chiave_attiva, q)
+                        dati = estrai_dati_da_pdf(percorso_pdf, "energia elettrica", chiave_attiva, modello_attivo, q)
                         dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                         dati_ee.append(dati)
-                        q.put(f"   [Completato] {f} -> Estratti kWh: {dati['consumo_kwh_convertito']}")
+                        q.put(f"   [OK] {f} -> {dati['consumo_kwh_convertito']} kWh")
                         
             cartella_gas = config.get("gas")
             if cartella_gas and os.path.exists(cartella_gas):
-                q.put(f"Scansione file PDF nella cartella Gas: {cartella_gas}")
+                q.put(f"Scansione file PDF in Gas: {cartella_gas}")
                 for f in os.listdir(cartella_gas):
                     if f.lower().endswith('.pdf'):
                         percorso_pdf = os.path.join(cartella_gas, f)
-                        dati = estrai_dati_da_pdf(percorso_pdf, "gas", chiave_attiva, q)
+                        dati = estrai_dati_da_pdf(percorso_pdf, "gas", chiave_attiva, modello_attivo, q)
                         dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                         dati_gas.append(dati)
-                        q.put(f"   [Completato] {f} -> Estratti kWh: {dati['consumo_kwh_convertito']}")
+                        q.put(f"   [OK] {f} -> {dati['consumo_kwh_convertito']} kWh")
 
             if not cartella_ee and not cartella_gas:
                 q.put("ATTENZIONE: Nessuna cartella trovata.")
