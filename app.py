@@ -47,8 +47,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
 # 2. LOGICA ESTRAZIONE E CONVERSIONE
 # ==========================================
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
-    # Invece di usare le API di upload (che causano l'errore HttpError nell'eseguibile),
-    # leggiamo il file in memoria e lo mandiamo direttamente a Gemini in formato bytes.
+    # Leggiamo il PDF direttamente in memoria
     with open(percorso_file, "rb") as doc_file:
         pdf_bytes = doc_file.read()
         
@@ -57,7 +56,6 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
         "data": pdf_bytes
     }
         
-    model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
     Leggi questa bolletta di {tipo_bolletta}.
     Estrai i dati e rispondi SOLO con un oggetto JSON valido con questa struttura:
@@ -65,10 +63,26 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    response = model.generate_content([prompt, pdf_part])
-        
-    testo_pulito = response.text.strip().replace('```json', '').replace('```', '').strip()
-    return json.loads(testo_pulito)
+    # Selettore dinamico dei modelli (dal più recente) per bypassare errori 404
+    modelli_supportati = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash-latest']
+    ultimo_errore = None
+    
+    for nome_modello in modelli_supportati:
+        try:
+            model = genai.GenerativeModel(nome_modello)
+            response = model.generate_content([prompt, pdf_part])
+            testo_pulito = response.text.strip().replace('```json', '').replace('```', '').strip()
+            return json.loads(testo_pulito)
+        except Exception as e:
+            ultimo_errore = e
+            # Se il modello non è trovato (404), passa al successivo. Altrimenti blocca e mostra l'errore.
+            if "404" in str(e) or "NotFound" in str(e):
+                continue
+            else:
+                raise e
+                
+    # Se nessun modello funziona, restituiamo l'ultimo errore registrato
+    raise ultimo_errore
 
 def converti_in_kwh(dati):
     try:
