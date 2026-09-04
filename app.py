@@ -19,7 +19,7 @@ def analizza_bollette(azienda, cartella, status_label):
         return
 
     valid_extensions = ('.pdf', '.jpg', '.jpeg', '.png')
-    # Parole chiave per filtrare a monte e saltare istantaneamente i file non pertinenti
+    # Parole chiave nel nome file per velocizzare drasticamente l'analisi
     bill_keywords = ('boll', 'fatt', 'ener', 'luce', 'bill', 'invo', 'elett', 'consum', 'pod', 'fornit')
     
     file_list = []
@@ -27,7 +27,7 @@ def analizza_bollette(azienda, cartella, status_label):
         for filename in files:
             if filename.lower().endswith(valid_extensions):
                 filename_lower = filename.lower()
-                # Seleziona solo i file che contengono almeno una parola chiave utile nel nome
+                # Filtra i file concentrandosi solo su quelli con nomi pertinenti
                 if any(kw in filename_lower for kw in bill_keywords):
                     file_list.append((root_dir, filename))
     
@@ -194,7 +194,7 @@ def avvia_estrazione():
     cartella = entry_path.get()
     analizza_bollette(azienda, cartella, lbl_status)
 
-# Configurazione Interfaccia Grafica Moderna
+# Interfaccia Grafica
 root = tk.Tk()
 root.title("Estrai Consumi Bollette")
 root.geometry("500x380")
@@ -203,19 +203,16 @@ root.configure(bg="#f8fafc")
 
 FONT_FAMILY = "Segoe UI"
 
-# Intestazione grafica
 lbl_title = tk.Label(root, text="Analizzatore Bollette Elettriche", font=(FONT_FAMILY, 15, "bold"), bg="#f8fafc", fg="#1e293b")
 lbl_title.pack(anchor="w", padx=28, pady=(24, 2))
 
 lbl_subtitle = tk.Label(root, text="Estrazione rapida mirata e export in Excel", font=(FONT_FAMILY, 9), bg="#f8fafc", fg="#64748b")
 lbl_subtitle.pack(anchor="w", padx=28, pady=(0, 18))
 
-# Sezione Azienda
 tk.Label(root, text="Nome Azienda:", font=(FONT_FAMILY, 10, "bold"), bg="#f8fafc", fg="#334155").pack(anchor="w", padx=28, pady=(4, 4))
 entry_azienda = tk.Entry(root, font=(FONT_FAMILY, 10), relief="solid", bd=1, highlightthickness=0)
 entry_azienda.pack(padx=28, pady=2, fill="x", ipady=5)
 
-# Sezione Percorso Cartella
 tk.Label(root, text="Cartella Bollette (PDF / Immagini):", font=(FONT_FAMILY, 10, "bold"), bg="#f8fafc", fg="#334155").pack(anchor="w", padx=28, pady=(12, 4))
 
 frame_path = tk.Frame(root, bg="#f8fafc")
@@ -227,7 +224,6 @@ entry_path.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 8))
 btn_browse = tk.Button(frame_path, text="Sfoglia...", command=seleziona_cartella, font=(FONT_FAMILY, 9, "bold"), bg="#e2e8f0", fg="#334155", relief="flat", cursor="hand2", padx=14, pady=5)
 btn_browse.pack(side="right")
 
-# Bottone Principale d'Azione
 btn_run = tk.Button(root, text="Analizza ed Esporta in Excel", command=avvia_estrazione, bg="#0284c7", fg="white", font=(FONT_FAMILY, 10, "bold"), relief="flat", cursor="hand2", pady=10)
 btn_run.pack(padx=28, pady=(24, 10), fill="x")
 
