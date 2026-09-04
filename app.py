@@ -39,18 +39,16 @@ def trova_cartella_categoria(percorso_root, categoria):
     return candidata
 
 # ==========================================
-# 2. MOTORE DI ESTRAZIONE CHIRURGICO (PRIMA PAGINA)
+# 2. MOTORE DI ESTRAZIONE CHIRURGICO (MIGLIORATO)
 # ==========================================
 def estrai_dati_locale(percorso_file, categoria, q):
     nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Analisi prima pagina: {nome_file}")
+    q.put(f" -> Analisi documento: {nome_file}")
     
-    testo_prima_pagina = ""
     testo_completo = ""
     try:
         reader = PdfReader(percorso_file)
-        if len(reader.pages) > 0:
-            testo_prima_pagina = reader.pages[0].extract_text() or ""
+        # Analizziamo l'INTERO documento, i dettagli dei consumi sono spesso in pagina 2 o 3
         for page in reader.pages:
             estratto = page.extract_text()
             if estratto:
@@ -59,7 +57,6 @@ def estrai_dati_locale(percorso_file, categoria, q):
         q.put(f"   [Errore] Impossibile leggere {nome_file}.")
         return None
         
-    testo_p1_lower = testo_prima_pagina.lower()
     testo_tot_lower = testo_completo.lower()
     
     # Rilevamento Mese e Anno
@@ -79,51 +76,68 @@ def estrai_dati_locale(percorso_file, categoria, q):
         
     if mese_trovato == "Gennaio":
         for m in mesi:
-            if m in testo_p1_lower:
+            if m in testo_tot_lower:
                 mese_trovato = m.capitalize()
                 break
     if not match_anno:
-        match_anno_testo = re.search(r"(202\d)", testo_p1_lower)
+        match_anno_testo = re.search(r"(202\d)", testo_tot_lower)
         if match_anno_testo:
             anno_trovato = int(match_anno_testo.group(1))
 
-    # Algoritmo di estrazione ultra-mirato per evitare abbagli
+    # Algoritmo di estrazione migliorato
     quantita = 0.0
     unita_misura = ""
 
     if categoria == 'energia_elettrica':
         unita_misura = "KWH"
-        # Cerca esplicitamente vicino a parole chiave di consumo energetico ed esclude simboli di valuta (€)
+        # Cerca esplicitamente "kwh" vicino al numero per escludere prezzi e codici.
+        # Negative lookbehind (?<!€\s) per assicurarsi che non ci sia il simbolo dell'Euro prima del numero.
         patterns = [
-            r"(?:consumo|energia attiva|prelevata|attiva|totale\s*kwh|kwh\s*totali)[\s\S]{0,30}?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)",
-            r"(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)\s*kwh"
+            r"(?:consumo|energia attiva|prelevata|totale|fatturat)[\s\S]{0,60}?(?<!€\s)(?<!€)\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b\s*kwh",
+            r"\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b\s*kwh",
+            r"kwh\s*(?:totali|fatturati|consumati)[\s\S]{0,30}?\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b"
         ]
     elif categoria == 'trasporti':
         unita_misura = "Litri"
         patterns = [
-            r"(?:quantit[aà]|q\.t[aà]|litri|volume|erogata)[\s\S]{0,30}?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)",
-            r"(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)\s*(?:litri|lt|l)"
+            r"(?:quantit[aà]|q\.t[aà]|litri|volume|erogata)[\s\S]{0,60}?(?<!€\s)(?<!€)\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b\s*(?:litri|lt|l\b)",
+            r"\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b\s*(?:litri|lt|l\b)",
+            r"(?:litri|quantit[aà])[\s\S]{0,30}?\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b"
         ]
     else:
-        patterns = [r"(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)"]
+        patterns = [r"\b(\d{1,5}(?:[.,]\d{3})*(?:[.,]\d+)?)\b"]
 
+    trovato = False
     for pat in patterns:
-        matches = re.findall(pat, testo_p1_lower)
+        matches = re.findall(pat, testo_tot_lower)
         if matches:
             for val_str in matches:
                 if isinstance(val_str, tuple):
                     val_str = val_str[0]
-                val_clean = val_str.replace('.', '').replace(',', '.')
+                
+                # Gestione robusta dei decimali: formato italiano vs inglese
+                if '.' in val_str and ',' not in val_str:
+                    val_clean = val_str # Esempio: 1234.56
+                else:
+                    # Rimuove i punti delle migliaia e trasforma la virgola in punto decimale
+                    val_clean = val_str.replace('.', '').replace(',', '.')
+                    
                 try:
                     num = float(val_clean)
-                    # Filtro di sicurezza: scarta numeri troppo piccoli o cifre che sembrano date/partita iva
-                    if 1 <= num < 1000000:
+                    # Filtri logici stringenti:
+                    # - Maggiore di 0
+                    # - Minore di 1 milione (esclude POD, Partite IVA, codici cliente)
+                    # - Diverso dagli anni correnti per evitare di pescare "2023", "2024" come consumi
+                    if 0 < num < 1000000 and num not in [2022, 2023, 2024, 2025, 2026]:
                         quantita = num
+                        trovato = True
                         break
                 except:
                     continue
-            if quantita > 0:
+            if trovato:
                 break
+
+    # Se non trova nulla con i pattern forti, mantiene quantita a 0 (sarà segnalato nel report)
 
     # Rilevamento Carburante per Trasporti
     tipo_carburante = ""
@@ -135,7 +149,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
         else:
             tipo_carburante = "Non specificato"
 
-    q.put(f"   [OK] Consumo: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
+    q.put(f"   [OK] Consumo rilevato: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
     
     risultato = {
         "nome_file": nome_file,
@@ -150,7 +164,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
     return risultato
 
 # ==========================================
-# 3. INTERFACCIA WEB
+# 3. INTERFACCIA WEB (INVARIATA)
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
