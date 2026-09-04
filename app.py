@@ -7,7 +7,6 @@ import google.generativeai as genai
 from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
-
 # ==========================================
 # 1. LOGICA DI RICERCA CARTELLE
 # ==========================================
