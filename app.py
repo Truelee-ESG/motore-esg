@@ -30,12 +30,16 @@ def analizza_bollette(azienda, cartella, status_label):
     
     ws.append(["Azienda", "Nome File", "Percorso", "Consumo (kWh)"])
     
+    for col in range(1, 5):
+        ws.cell(row=1, column=col).font = openpyxl.styles.Font(bold=True)
+
     success_count = 0
     total_files = len(pdf_files)
     valid_count = 0
     
     for root_dir, filename in pdf_files:
         file_path = os.path.join(root_dir, filename)
+        abs_path = os.path.abspath(file_path)
         rel_path = os.path.relpath(file_path, cartella)
         
         try:
@@ -44,12 +48,19 @@ def analizza_bollette(azienda, cartella, status_label):
                     text = pdf.pages[0].extract_text()
                     if text:
                         text_lower = text.lower()
-                        # Filtra solo i documenti che contengono riferimenti all'energia elettrica e al consumo in kWh
                         if "energia elettrica" in text_lower or "kwh" in text_lower:
                             match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
                             if match_kwh:
                                 consumo = match_kwh.group(1)
+                                
+                                row_idx = ws.max_row + 1
                                 ws.append([azienda, filename, rel_path, consumo])
+                                
+                                # Aggiunge il link ipertestuale cliccabile al file PDF sul nome del file
+                                cell = ws.cell(row=row_idx, column=2)
+                                cell.hyperlink = abs_path
+                                cell.font = openpyxl.styles.Font(color="0563C1", underline="single")
+                                
                                 valid_count += 1
         except Exception:
             pass
