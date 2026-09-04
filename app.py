@@ -34,7 +34,7 @@ def analizza_file_trasporti(cartella):
         return None
     
     valid_extensions = ('.pdf', '.jpg', '.jpeg', '.png')
-    target_keywords = ['gasolio', 'benzina', 'auto', 'trasporti', 'carburante', 'fleet', 'veicoli']
+    target_keywords = ['gasolio', 'benzina', 'mezzi', 'auto', 'trasporti', 'carburante', 'fleet', 'veicoli']
     
     file_list = []
     for root_dir, _, files in os.walk(cartella):
@@ -46,6 +46,7 @@ def analizza_file_trasporti(cartella):
                 if is_target_dir or any(kw in filename.lower() for kw in target_keywords):
                     file_list.append((root_dir, filename))
                     
+    # Se non trova sottocartelle specifiche, esegue il fallback sull'intera cartella
     if not file_list:
         for root_dir, _, files in os.walk(cartella):
             for filename in files:
@@ -137,7 +138,6 @@ def _process_energia_elettrica():
                                 if periodot != "Non rilevato": periodo = periodot
                                 if annot != "Non rilevato": anno = annot
 
-                                # Estrazione avanzata con esclusione delle fasce F1, F2, F3
                                 try:
                                     words = page.extract_words(extra_attrs=["size"])
                                     candidates = []
@@ -253,25 +253,31 @@ def _process_trasporti():
             if text:
                 text_lower = text.lower()
                 combined_text = f"{root_dir} {text_lower}"
+                
                 if "benzina" in combined_text:
                     carburante = "Benzina"
-                elif any(k in combined_text for k in ["gasolio", "diesel"]):
+                elif any(k in combined_text for k in ["gasolio", "diesel", "carbur")]:
                     carburante = "Diesel"
 
                 periodo, anno = estrai_mesi_e_anno(text, text_lower)
 
-                match_qty_unit = re.search(r'(\d+[\.,]?\d*)\s*(litri|Litri|L|litro|mc|MC|Smc|SMC|smc)', text)
+                # Gestione specifica basata sul tracciato fattura (es. formato 2.500,00 L)
+                match_qty_unit = re.search(r'(\d{1,3}(?:\.\d{3})*[\.,]?\d*)\s*(litri|Litri|L|litro|mc|MC|Smc|SMC|smc)', text)
                 if match_qty_unit:
-                    quantita = match_qty_unit.group(1)
+                    raw_q = match_qty_unit.group(1)
+                    # Normalizzazione formato numerico italiano (es. 2.500,00 -> 2500.00 o pulizia punti)
+                    quantita = raw_q.replace('.', '').replace(',', '.')
                     u_raw = match_qty_unit.group(2).lower()
                     if any(u in u_raw for u in ["mc", "smc"]):
                         unita_misura = "Metri cubi"
                     else:
                         unita_misura = "Litri"
                 else:
-                    match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,15}(\d+[\.,]?\d*)', text_lower)
+                    # Cerca sotto etichette tipo quantità, q.tà, q,tà
+                    match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,15}(\d{1,3}(?:\.\d{3})*[\.,]?\d*)', text_lower)
                     if match_label:
-                        quantita = match_label.group(1)
+                        raw_q = match_label.group(1)
+                        quantita = raw_q.replace('.', '').replace(',', '.')
                         if any(u in text_lower for u in ["mc", "smc", "metri cubi"]):
                             unita_misura = "Metri cubi"
                         else:
@@ -290,7 +296,7 @@ def _process_trasporti():
         lbl_status_trans.config(text=f"Controllati: {idx} / {total_files} (Validi: {valid_count})")
 
     if valid_count == 0:
-        messagebox.showwarning("Attenzione", "Nessuna fattura carburante valida trovata.")
+        messagebox.showwarning("Attenzione", "Nessuna fattura carburante valida trovata nelle cartelle analizzate.")
         return
 
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
