@@ -102,7 +102,11 @@ def estrai_dati_locale(percorso_file, categoria, q):
     unita_misura = "KWH" if categoria == 'energia_elettrica' else "Litri"
     
     matches = re.finditer(r'\b(\d{1,6}(?:[.,]\d{3})*(?:[.,]\d+)?)\b', testo_p1_lower)
-    
+
+    # Pattern per riconoscere le fasce orarie F1, F2, F3 in tutte le forme comuni
+    # nelle bollette elettriche italiane: "F1", "F 1", "f.1", "fascia1", "fascia 1", ecc.
+    pattern_fasce = re.compile(r'\bf\s?\.?\s?[123]\b')
+
     for m in matches:
         val_str = m.group(1)
         
@@ -117,6 +121,12 @@ def estrai_dati_locale(percorso_file, categoria, q):
             start = max(0, m.start() - 50)
             end = min(len(testo_p1_lower), m.end() + 50)
             contesto = testo_p1_lower[start:end]
+
+            # ESCLUSIONE TOTALE: se nel contesto vicino al numero compare F1, F2 o F3
+            # (fasce orarie), il candidato viene scartato a priori, indipendentemente
+            # dal punteggio, per evitare di prendere i consumi divisi per fascia.
+            if pattern_fasce.search(contesto):
+                continue
             
             score = 0
             
@@ -175,7 +185,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
     link_excel = f'=HYPERLINK("{percorso_file_uri}", "{nome_file}")'
 
     risultato = {
-        "Nome File": link_excel,
+        "Bolletta (Link)": link_excel,
         "Mese": mese_trovato,
         "Anno": anno_trovato,
         "Quantità": quantita,
