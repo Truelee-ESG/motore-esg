@@ -18,13 +18,11 @@ def analizza_bollette(azienda, cartella, status_label):
         messagebox.showerror("Errore", "La cartella specificata non esiste.")
         return
 
-    # Estensioni ammesse con priorità e scarto a priori di tutto il resto
     valid_extensions = ('.pdf', '.jpg', '.jpeg', '.png')
     
     file_list = []
     for root_dir, _, files in os.walk(cartella):
         for filename in files:
-            # Scarta a priori i file con estensioni non supportate
             if filename.lower().endswith(valid_extensions):
                 file_list.append((root_dir, filename))
     
@@ -36,15 +34,12 @@ def analizza_bollette(azienda, cartella, status_label):
     ws = wb.active
     ws.title = "Consumi Elettrici"
     
-    # Intestazione del report in alto con data e ora correnti del PC
     current_time_str = datetime.now().strftime("%d/%m/%Y alle %H:%M")
     ws.append([f"Estrazione dati dalle bollette in data {current_time_str}"])
     ws.cell(row=1, column=1).font = Font(size=12, bold=True, color="1F497D")
     
-    # Riga vuota di separazione
     ws.append([])
     
-    # Intestazioni tabella aggiornate con "Unità di misura"
     headers = ["Azienda", "Nome File", "Periodo", "Anno", "Consumo (kWh)", "Unità di misura"]
     ws.append(headers)
     
@@ -88,12 +83,10 @@ def analizza_bollette(azienda, cartella, status_label):
                         if text:
                             text_lower = text.lower()
                             if "energia elettrica" in text_lower or "kwh" in text_lower:
-                                # Estrazione Anno
                                 years = re.findall(r'\b(20\d{2})\b', text)
                                 if years:
                                     anno = years[0]
                                     
-                                # Estrazione Periodo
                                 found_mesi = []
                                 for m_key, m_val in mesi_mappa.items():
                                     if re.search(r'\b' + m_key + r'\b', text_lower):
@@ -102,7 +95,6 @@ def analizza_bollette(azienda, cartella, status_label):
                                 if found_mesi:
                                     periodo = found_mesi[0] if len(found_mesi) == 1 else f"{found_mesi[0]} - {found_mesi[-1]}"
 
-                                # Estrazione Consumo (kWh) con logica dimensione carattere e filtro F1/F2/F3
                                 try:
                                     words = page.extract_words(extra_attrs=["size"])
                                     candidates = []
@@ -162,7 +154,6 @@ def analizza_bollette(azienda, cartella, status_label):
                 row_idx = ws.max_row + 1
                 ws.append([azienda, filename, periodo, anno, consumo, unita_misura])
                 
-                # Hyperlink sul nome file (Colonna 2)
                 cell_file = ws.cell(row=row_idx, column=2)
                 cell_file.hyperlink = abs_path
                 cell_file.font = Font(color="0563C1", underline="single")
@@ -198,30 +189,44 @@ def avvia_estrazione():
     cartella = entry_path.get()
     analizza_bollette(azienda, cartella, lbl_status)
 
+# Configurazione Interfaccia Grafica Moderna
 root = tk.Tk()
 root.title("Estrai Consumi Bollette")
-root.geometry("450x300")
+root.geometry("500x380")
 root.resizable(False, False)
+root.configure(bg="#f8fafc")
 
-tk.Label(root, text="Nome Azienda:", font=("Arial", 10, "bold")).pack(anchor="w", padx=20, pady=(20, 5))
-entry_azienda = tk.Entry(root, width=50, font=("Arial", 10))
-entry_azienda.pack(padx=20, pady=5)
+FONT_FAMILY = "Segoe UI"
 
-tk.Label(root, text="Cartella Bollette (PDF/Img):", font=("Arial", 10, "bold")).pack(anchor="w", padx=20, pady=(10, 5))
+# Intestazione grafica
+lbl_title = tk.Label(root, text="Analizzatore Bollette Elettriche", font=(FONT_FAMILY, 15, "bold"), bg="#f8fafc", fg="#1e293b")
+lbl_title.pack(anchor="w", padx=28, pady=(24, 2))
 
-frame_path = tk.Form = tk.Frame(root) if hasattr(tk, 'Form') else tk.Frame(root) # standard frame
-frame_path.pack(padx=20, pady=5, fill="x")
+lbl_subtitle = tk.Label(root, text="Estrai consumi in kWh ed esporta in Excel in modo semplice", font=(FONT_FAMILY, 9), bg="#f8fafc", fg="#64748b")
+lbl_subtitle.pack(anchor="w", padx=28, pady=(0, 18))
 
-entry_path = tk.Entry(frame_path, width=38, font=("Arial", 10))
-entry_path.pack(side="left", padx=(0, 5))
+# Sezione Azienda
+tk.Label(root, text="Nome Azienda:", font=(FONT_FAMILY, 10, "bold"), bg="#f8fafc", fg="#334155").pack(anchor="w", padx=28, pady=(4, 4))
+entry_azienda = tk.Entry(root, font=(FONT_FAMILY, 10), relief="solid", bd=1, highlightthickness=0)
+entry_azienda.pack(padx=28, pady=2, fill="x", ipady=5)
 
-btn_browse = tk.Button(frame_path, text="Sfoglia", command=seleziona_cartella, font=("Arial", 9))
-btn_browse.pack(side="left")
+# Sezione Percorso Cartella
+tk.Label(root, text="Cartella Bollette (PDF / Immagini):", font=(FONT_FAMILY, 10, "bold"), bg="#f8fafc", fg="#334155").pack(anchor="w", padx=28, pady=(12, 4))
 
-btn_run = tk.Button(root, text="Analizza ed Esporta in Excel", command=avvia_estrazione, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"))
-btn_run.pack(padx=20, pady=25, fill="x")
+frame_path = tk.Frame(root, bg="#f8fafc")
+frame_path.pack(padx=28, pady=2, fill="x")
 
-lbl_status = tk.Label(root, text="", font=("Arial", 9, "italic"), fg="gray")
-lbl_status.pack(padx=20, pady=(0, 10))
+entry_path = tk.Entry(frame_path, font=(FONT_FAMILY, 10), relief="solid", bd=1)
+entry_path.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 8))
+
+btn_browse = tk.Button(frame_path, text="Sfoglia...", command=seleziona_cartella, font=(FONT_FAMILY, 9, "bold"), bg="#e2e8f0", fg="#334155", relief="flat", cursor="hand2", padx=14, pady=5)
+btn_browse.pack(side="right")
+
+# Bottone Principale d'Azione
+btn_run = tk.Button(root, text="Analizza ed Esporta in Excel", command=avvia_estrazione, bg="#0284c7", fg="white", font=(FONT_FAMILY, 10, "bold"), relief="flat", cursor="hand2", pady=10)
+btn_run.pack(padx=28, pady=(24, 10), fill="x")
+
+lbl_status = tk.Label(root, text="", font=(FONT_FAMILY, 9, "italic"), bg="#f8fafc", fg="#64748b")
+lbl_status.pack(padx=28, pady=(0, 10))
 
 root.mainloop()
