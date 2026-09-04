@@ -4,7 +4,7 @@ import time
 import threading
 import webbrowser
 import pandas as pd
-from google import genai
+import google.generativeai as genai
 from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
@@ -30,7 +30,7 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
     if api_key_inserita:
         config['api_key'] = api_key_inserita
 
-    if not config.get("ee") or not config.get("gas") or not os.path.exists(str(config.get("ee"))):
+    if not config.get("ee") or not config.get("gas") or not os.path.exists(str(config.get("ee", ""))):
         for root, dirs, files in os.walk(percorso_root):
             for directory in dirs:
                 nome_dir = directory.lower()
@@ -47,27 +47,23 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
 # ==========================================
 # 2. LOGICA ESTRAZIONE E CONVERSIONE
 # ==========================================
-def estrai_dati_da_pdf(client, percorso_file, tipo_bolletta):
-    file_caricato = client.files.upload(file=percorso_file)
-    
+def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
+    file_caricato = genai.upload_file(percorso_file)
     while file_caricato.state.name == 'PROCESSING':
         time.sleep(2)
-        file_caricato = client.files.get(name=file_caricato.name)
+        file_caricato = genai.get_file(file_caricato.name)
         
+    model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
     Leggi questa bolletta di {tipo_bolletta}.
     Estrai i dati e rispondi SOLO con un oggetto JSON valido con questa struttura:
     {{"mese": "gennaio", "anno": 2026, "consumo": 120.5, "unita_misura": "sm3", "tipo_gas": "metano"}}
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
-    
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=[file_caricato, prompt]
-    )
+    response = model.generate_content([prompt, file_caricato])
     
     try:
-        client.files.delete(name=file_caricato.name)
+        genai.delete_file(file_caricato.name) 
     except Exception:
         pass
         
@@ -152,7 +148,7 @@ def avvia_processo():
         if not chiave_attiva:
             return "Errore: API Key mancante o non valida.", 400
         
-        client = genai.Client(api_key=chiave_attiva)
+        genai.configure(api_key=chiave_attiva)
 
         dati_ee = []
         dati_gas = []
@@ -162,7 +158,7 @@ def avvia_processo():
             for f in os.listdir(cartella_ee):
                 if f.lower().endswith('.pdf'):
                     percorso_pdf = os.path.join(cartella_ee, f)
-                    dati = estrai_dati_da_pdf(client, percorso_pdf, "energia elettrica")
+                    dati = estrai_dati_da_pdf(percorso_pdf, "energia elettrica")
                     dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                     dati_ee.append(dati)
                     
@@ -171,7 +167,7 @@ def avvia_processo():
             for f in os.listdir(cartella_gas):
                 if f.lower().endswith('.pdf'):
                     percorso_pdf = os.path.join(cartella_gas, f)
-                    dati = estrai_dati_da_pdf(client, percorso_pdf, "gas")
+                    dati = estrai_dati_da_pdf(percorso_pdf, "gas")
                     dati['consumo_kwh_convertito'] = converti_in_kwh(dati)
                     dati_gas.append(dati)
 
@@ -179,7 +175,7 @@ def avvia_processo():
             return f"""
             <div style="font-family: Arial; padding: 20px; max-width: 600px; margin: 0 auto;">
                 <h3 style="color: #d32f2f;">Cartelle non trovate</h3>
-                <p>Impossibile individuare automaticamente cartelle con nomi contenenti 'energia', 'elettric', 'gas' o 'metano' all'interno di:</p>
+                <p>Impossibile individuare automaticamente cartelle valide all'interno di:</p>
                 <p><b>{percorso_root}</b></p>
                 <br><a href="/">Torna alla home e verifica la struttura delle cartelle</a>
             </div>
@@ -192,7 +188,7 @@ def avvia_processo():
             if dati_gas:
                 pd.DataFrame(dati_gas).to_excel(writer, sheet_name='Gas', index=False)
             if not dati_ee and not dati_gas:
-                pd.DataFrame([{"Note": "Nessun file PDF trovato nelle cartelle individuate"}]).to_excel(writer, sheet_name='Vuoto', index=False)
+                pd.DataFrame([{"Note": "Nessun file PDF trovato"}]).to_excel(writer, sheet_name='Vuoto', index=False)
 
         return f"""
         <div style="font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto; text-align: center;">
@@ -205,10 +201,12 @@ def avvia_processo():
         </div>
         """
     except Exception as err:
+        import traceback
+        dettagli_errore = traceback.format_exc()
         return f"""
         <div style="font-family: Arial; padding: 20px; max-width: 700px; margin: 0 auto; background: #fff3f3; border: 1px solid #ffcdd2; border-radius: 4px;">
-            <h3 style="color: #c62828;">Dettaglio Errore:</h3>
-            <p style="font-family: monospace; background: #fff; padding: 10px; border: 1px solid #ddd; word-break: break-all;">{type(err).__name__}: {str(err)}</p>
+            <h3 style="color: #c62828;">Dettaglio Errore Tecnico:</h3>
+            <p style="font-family: monospace; background: #fff; padding: 10px; border: 1px solid #ddd; word-break: break-all; white-space: pre-wrap;">{dettagli_errore}</p>
             <br><a href="/">Torna indietro</a>
         </div>
         """, 500
