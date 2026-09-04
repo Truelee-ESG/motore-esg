@@ -11,6 +11,13 @@ from flask import Flask, request, render_template_string, Response
 
 app = Flask(__name__)
 
+# Mappa per l'ordinamento cronologico dei mesi
+MESI_ORDINE = {
+    'Gennaio': 1, 'Febbraio': 2, 'Marzo': 3, 'Aprile': 4,
+    'Maggio': 5, 'Giugno': 6, 'Luglio': 7, 'Agosto': 8,
+    'Settembre': 9, 'Ottobre': 10, 'Novembre': 11, 'Dicembre': 12
+}
+
 # ==========================================
 # 1. RICERCA CARTELLA PER CATEGORIA
 # ==========================================
@@ -32,7 +39,7 @@ def trova_cartella_categoria(percorso_root, categoria):
     return candidata
 
 # ==========================================
-# 2. MOTORE DI ESTRAZIONE PURA (PRIMA PAGINA)
+# 2. MOTORE DI ESTRAZIONE CHIRURGICO (PRIMA PAGINA)
 # ==========================================
 def estrai_dati_locale(percorso_file, categoria, q):
     nome_file = os.path.basename(percorso_file)
@@ -80,12 +87,13 @@ def estrai_dati_locale(percorso_file, categoria, q):
         if match_anno_testo:
             anno_trovato = int(match_anno_testo.group(1))
 
-    # Estrazione mirata del solo consumo sulla prima pagina
+    # Algoritmo di estrazione ultra-mirato per evitare abbagli
     quantita = 0.0
     unita_misura = ""
 
     if categoria == 'energia_elettrica':
-        unita_misura = "kWh"
+        unita_misura = "KWH"
+        # Cerca esplicitamente vicino a parole chiave di consumo energetico ed esclude simboli di valuta (€)
         patterns = [
             r"(?:consumo|energia attiva|prelevata|attiva|totale\s*kwh|kwh\s*totali)[\s\S]{0,30}?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)",
             r"(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)\s*kwh"
@@ -108,7 +116,8 @@ def estrai_dati_locale(percorso_file, categoria, q):
                 val_clean = val_str.replace('.', '').replace(',', '.')
                 try:
                     num = float(val_clean)
-                    if num > 5:  # Scarta numeri troppo piccoli o irrilevanti
+                    # Filtro di sicurezza: scarta numeri troppo piccoli o cifre che sembrano date/partita iva
+                    if 1 <= num < 1000000:
                         quantita = num
                         break
                 except:
@@ -129,19 +138,19 @@ def estrai_dati_locale(percorso_file, categoria, q):
     q.put(f"   [OK] Consumo: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
     
     risultato = {
-        "Mese": mese_trovato,
-        "Anno": anno_trovato,
-        "Quantita": quantita,
-        "Unita_Misura": unita_misura,
-        "File": nome_file
+        "nome_file": nome_file,
+        "mese": mese_trovato,
+        "anno": anno_trovato,
+        "quantita": quantita,
+        "unita_misura": unita_misura
     }
     if categoria == 'trasporti':
-        risultato["Tipo_Carburante"] = tipo_carburante
+        risultato["tipo_carburante"] = tipo_carburante
         
     return risultato
 
 # ==========================================
-# 3. INTERFACCIA WEB PULITA
+# 3. INTERFACCIA WEB
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -256,17 +265,26 @@ def avvia_processo():
                 if res:
                     dati_estratti.append(res)
 
-            q.put("\n--- Generazione file Excel sul Desktop ---")
+            # ORDINAMENTO CRONOLOGICO (Gennaio -> Dicembre)
+            if dati_estratti:
+                df = pd.DataFrame(dati_estratti)
+                df['num_mese'] = df['mese'].map(MESI_ORDINE).fillna(13)
+                df = df.sort_values(by=['anno', 'num_mese']).drop(columns=['num_mese'])
+                dati_estratti_ordinati = df.to_dict('records')
+            else:
+                dati_estratti_ordinati = []
+
+            q.put("\n--- Generazione file Excel ordinato sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
             nome_file_excel = os.path.join(desktop_path, f"Report_{categoria.capitalize()}_{nome_cliente}.xlsx")
 
             with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
-                if dati_estratti:
-                    pd.DataFrame(dati_estratti).to_excel(writer, sheet_name=categoria.capitalize(), index=False)
+                if dati_estratti_ordinati:
+                    pd.DataFrame(dati_estratti_ordinati).to_excel(writer, sheet_name=categoria.capitalize(), index=False)
                 else:
                     pd.DataFrame([{"Note": "Nessun dato estratto"}]).to_excel(writer, sheet_name='Vuoto', index=False)
 
-            q.put(f"SUCCESSO: File Excel pronto!")
+            q.put(f"SUCCESSO: File Excel pronto e ordinato cronologicamente!")
             q.put(("DONE", nome_file_excel))
         except Exception as err:
             import traceback
@@ -311,7 +329,7 @@ def avvia_processo():
             if isinstance(item, tuple) and item[0] == "DONE":
                 file_path = item[1]
                 if file_path:
-                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #2e7d32; text-align:center;\">Processo Completato!</h3><p style=\"text-align:center;\">File salvato sul Desktop:<br><b>{file_path}</b></p><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
+                    yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #2e7d32; text-align:center;\">Processo Completato con Successo!</h3><p style=\"text-align:center;\">File salvato sul Desktop:<br><b>{file_path}</b></p><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
                 else:
                     yield f"<script>document.getElementById('result-area').innerHTML = '<h3 style=\"color: #c62828; text-align:center;\">Terminato con errori.</h3><div style=\"text-align:center;\"><a href=\"/\" class=\"btn\">Torna alla Home</a></div>';</script>"
                 break
