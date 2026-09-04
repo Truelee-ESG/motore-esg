@@ -1,8 +1,9 @@
 import os
 import re
 from datetime import datetime
+import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import pdfplumber
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -54,6 +55,9 @@ def estrai_mesi_e_anno(text, text_lower):
     return periodo, anno
 
 def avvia_energia_elettrica():
+    threading.Thread(target=_process_energia_elettrica, daemon=True).start()
+
+def _process_energia_elettrica():
     azienda = entry_azienda.get().strip()
     cartella = entry_path.get().strip()
     if not azienda or not cartella:
@@ -64,6 +68,9 @@ def avvia_energia_elettrica():
     if not file_list:
         messagebox.showwarning("Attenzione", "Nessun file valido trovato nella cartella.")
         return
+
+    total_files = len(file_list)
+    progress_elec.config(maximum=total_files, value=0)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -82,7 +89,7 @@ def avvia_energia_elettrica():
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     valid_count = 0
-    for root_dir, filename in file_list:
+    for idx, (root_dir, filename) in enumerate(file_list, 1):
         file_path = os.path.join(root_dir, filename)
         ext = filename.lower()
         quantita = "Non rilevato"
@@ -113,6 +120,10 @@ def avvia_energia_elettrica():
         except Exception:
             pass
 
+        # Aggiornamento barra di avanzamento e stato
+        progress_elec.config(value=idx)
+        lbl_status_elec.config(text=f"Controllati: {idx} / {total_files} (Validi: {valid_count})")
+
     if valid_count == 0:
         messagebox.showwarning("Attenzione", "Nessuna bolletta elettrica valida trovata.")
         return
@@ -123,6 +134,9 @@ def avvia_energia_elettrica():
     messagebox.showinfo("Successo", f"File Excel salvato sul Desktop:\n{os.path.basename(out_path)}")
 
 def avvia_trasporti():
+    threading.Thread(target=_process_trasporti, daemon=True).start()
+
+def _process_trasporti():
     azienda = entry_azienda.get().strip()
     cartella = entry_path.get().strip()
     if not azienda or not cartella:
@@ -133,6 +147,9 @@ def avvia_trasporti():
     if not file_list:
         messagebox.showwarning("Attenzione", "Nessun file valido trovato nella cartella.")
         return
+
+    total_files = len(file_list)
+    progress_trans.config(maximum=total_files, value=0)
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -151,7 +168,7 @@ def avvia_trasporti():
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     valid_count = 0
-    for root_dir, filename in file_list:
+    for idx, (root_dir, filename) in enumerate(file_list, 1):
         file_path = os.path.join(root_dir, filename)
         ext = filename.lower()
         quantita = "Non rilevato"
@@ -170,7 +187,6 @@ def avvia_trasporti():
                 if any(k in text_lower for k in ["gasolio", "benzina", "carburante", "litri", "l"]):
                     periodo, anno = estrai_mesi_e_anno(text, text_lower)
                     
-                    # Ricerca quantità associata a litri o unità di volume/peso
                     match_qty = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L|litro|kg|KG)', text)
                     if match_qty:
                         quantita = match_qty.group(1)
@@ -179,7 +195,6 @@ def avvia_trasporti():
                         else:
                             unita_misura = "Litri"
                     else:
-                        # Fallback generico se trova la parola carburante/gasolio/benzina e un numero decimale plausibile
                         match_dec = re.search(r'(?:quantit[aà]|litri)\D{0,15}(\d+[\.,]\d{2})', text_lower)
                         if match_dec:
                             quantita = match_dec.group(1)
@@ -193,6 +208,10 @@ def avvia_trasporti():
         except Exception:
             pass
 
+        # Aggiornamento barra di avanzamento e stato
+        progress_trans.config(value=idx)
+        lbl_status_trans.config(text=f"Controllati: {idx} / {total_files} (Validi: {valid_count})")
+
     if valid_count == 0:
         messagebox.showwarning("Attenzione", "Nessuna fattura carburante valida trovata.")
         return
@@ -205,20 +224,18 @@ def avvia_trasporti():
 # Configurazione Interfaccia Grafica (Layout Motore ESG)
 root = tk.Tk()
 root.title("Motore ESG - Estrazione Consumi")
-root.geometry("740x530")
+root.geometry("740x600")
 root.resizable(False, False)
 root.configure(bg="#ffffff")
 
 FONT_FAMILY = "Segoe UI"
 
-# Intestazione Principale
 lbl_main_title = tk.Label(root, text="Motore ESG", font=(FONT_FAMILY, 18, "bold"), bg="#ffffff", fg="#2e7d32")
 lbl_main_title.pack(pady=(18, 2))
 
 lbl_main_sub = tk.Label(root, text="Estrazione Consumi Rapida", font=(FONT_FAMILY, 10), bg="#ffffff", fg="#64748b")
 lbl_main_sub.pack(pady=(0, 16))
 
-# Frame Contenitore Campi Input Superiori
 frame_inputs = tk.Frame(root, bg="#ffffff")
 frame_inputs.pack(padx=30, fill="x", pady=5)
 
@@ -237,7 +254,6 @@ entry_path.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 8))
 btn_browse = tk.Button(frame_path_row, text="Sfoglia...", command=seleziona_cartella, font=(FONT_FAMILY, 9, "bold"), bg="#e2e8f0", fg="#334155", relief="flat", cursor="hand2", padx=16, pady=5)
 btn_browse.pack(side="right")
 
-# Frame Schede / Card Affiancate (Energia Elettrica vs Trasporti)
 frame_cards = tk.Frame(root, bg="#ffffff")
 frame_cards.pack(padx=30, pady=20, fill="both", expand=True)
 
@@ -246,19 +262,31 @@ card_elec = tk.Frame(frame_cards, bg="#ffffff", highlightbackground="#cbd5e1", h
 card_elec.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
 tk.Label(card_elec, text="Ambiente - Energia Elettrica", font=(FONT_FAMILY, 12, "bold"), bg="#ffffff", fg="#2e7d32").pack(pady=(16, 6))
-tk.Label(card_elec, text="Estrai kWh da Prima Pagina\ncon Link diretti.", font=(FONT_FAMILY, 9), bg="#ffffff", fg="#64748b", justify="center").pack(pady=(0, 16))
+tk.Label(card_elec, text="Estrai kWh da Prima Pagina\ncon Link diretti.", font=(FONT_FAMILY, 9), bg="#ffffff", fg="#64748b", justify="center").pack(pady=(0, 12))
 
 btn_elec = tk.Button(card_elec, text="Avvia Energia Elettrica", command=avvia_energia_elettrica, bg="#2e7d32", fg="white", font=(FONT_FAMILY, 10, "bold"), relief="flat", cursor="hand2", pady=8, padx=12)
-btn_elec.pack(pady=(0, 16))
+btn_elec.pack(pady=(0, 12))
+
+progress_elec = ttk.Progressbar(card_elec, orient="horizontal", length=220, mode="determinate")
+progress_elec.pack(pady=(0, 4))
+
+lbl_status_elec = tk.Label(card_elec, text="In attesa...", font=(FONT_FAMILY, 8), bg="#ffffff", fg="#64748b")
+lbl_status_elec.pack(pady=(0, 14))
 
 # Card 2: Trasporti
 card_trans = tk.Frame(frame_cards, bg="#ffffff", highlightbackground="#cbd5e1", highlightthickness=1, bd=0)
 card_trans.pack(side="right", fill="both", expand=True, padx=(10, 0))
 
 tk.Label(card_trans, text="Ambiente - Trasporti", font=(FONT_FAMILY, 12, "bold"), bg="#ffffff", fg="#2e7d32").pack(pady=(16, 6))
-tk.Label(card_trans, text="Estrai litri e tipo carburante\n(gasolio/benzina).", font=(FONT_FAMILY, 9), bg="#ffffff", fg="#64748b", justify="center").pack(pady=(0, 16))
+tk.Label(card_trans, text="Estrai litri e tipo carburante\n(gasolio/benzina).", font=(FONT_FAMILY, 9), bg="#ffffff", fg="#64748b", justify="center").pack(pady=(0, 12))
 
 btn_trans = tk.Button(card_trans, text="Avvia Trasporti", command=avvia_trasporti, bg="#2e7d32", fg="white", font=(FONT_FAMILY, 10, "bold"), relief="flat", cursor="hand2", pady=8, padx=12)
-btn_trans.pack(pady=(0, 16))
+btn_trans.pack(pady=(0, 12))
+
+progress_trans = ttk.Progressbar(card_trans, orient="horizontal", length=220, mode="determinate")
+progress_trans.pack(pady=(0, 4))
+
+lbl_status_trans = tk.Label(card_trans, text="In attesa...", font=(FONT_FAMILY, 8), bg="#ffffff", fg="#64748b")
+lbl_status_trans.pack(pady=(0, 14))
 
 root.mainloop()
