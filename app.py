@@ -14,7 +14,6 @@ def analizza_bollette(azienda, cartella, status_label):
         messagebox.showerror("Errore", "La cartella specificata non esiste.")
         return
 
-    # Ricerca ricorsiva in tutte le sottocartelle
     pdf_files = []
     for root_dir, _, files in os.walk(cartella):
         for filename in files:
@@ -29,31 +28,39 @@ def analizza_bollette(azienda, cartella, status_label):
     ws = wb.active
     ws.title = "Consumi Elettrici"
     
-    ws.append(["Azienda", "Nome File", "Percorso", "Consumo Stimato (kWh)"])
+    ws.append(["Azienda", "Nome File", "Percorso", "Consumo (kWh)"])
     
     success_count = 0
     total_files = len(pdf_files)
+    valid_count = 0
     
     for root_dir, filename in pdf_files:
         file_path = os.path.join(root_dir, filename)
         rel_path = os.path.relpath(file_path, cartella)
-        consumo = "Non rilevato"
         
         try:
             with pdfplumber.open(file_path) as pdf:
                 if len(pdf.pages) > 0:
                     text = pdf.pages[0].extract_text()
                     if text:
-                        match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
-                        if match_kwmatch := match_kwh:
-                            consumo = match_kwmatch.group(1)
-        except Exception as e:
-            consumo = f"Errore: {str(e)}"
+                        text_lower = text.lower()
+                        # Filtra solo i documenti che contengono riferimenti all'energia elettrica e al consumo in kWh
+                        if "energia elettrica" in text_lower or "kwh" in text_lower:
+                            match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
+                            if match_kwh:
+                                consumo = match_kwh.group(1)
+                                ws.append([azienda, filename, rel_path, consumo])
+                                valid_count += 1
+        except Exception:
+            pass
             
-        ws.append([azienda, filename, rel_path, consumo])
         success_count += 1
-        status_label.config(text=f"Elaborato ({success_count}/{total_files}): {filename}")
+        status_label.config(text=f"Scansionati ({success_count}/{total_files}) - Validi trovati: {valid_count}")
         status_label.update()
+
+    if valid_count == 0:
+        messagebox.showwarning("Attenzione", "Nessuna bolletta dell'energia elettrica valida è stata trovata nei file analizzati.")
+        return
 
     desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
     output_filename = f"Consumi_Elettrici_{azienda.replace(' ', '_')}.xlsx"
