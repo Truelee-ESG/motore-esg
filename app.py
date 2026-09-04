@@ -26,40 +26,37 @@ def trova_cartella_categoria(percorso_root, categoria):
             if categoria == 'energia_elettrica':
                 if any(k in nome_dir for k in ["energia", "elettric", "e.e", "luce"]):
                     return os.path.join(root, directory)
-            elif categoria == 'gasolio':
-                if any(k in nome_dir for k in ["gasolio", "benzina", "carburante", "trasporti", "auto", "furgoni", "mezzi"]):
+            elif categoria == 'trasporti':
+                if any(k in nome_dir for k in ["trasporti", "gasolio", "benzina", "carburante", "auto", "furgoni", "mezzi"]):
                     return os.path.join(root, directory)
     return candidata
 
 # ==========================================
-# 2. MOTORE DI ESTRAZIONE PURA LOCALE (REGEX)
+# 2. MOTORE DI ESTRAZIONE PRIMA PAGINA (LOCALE)
 # ==========================================
 def estrai_dati_locale(percorso_file, categoria, q):
     nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Analisi file: {nome_file}")
+    q.put(f" -> Analisi prima pagina: {nome_file}")
     
-    testo = ""
+    testo_prima_pagina = ""
+    testo_completo = ""
     try:
         reader = PdfReader(percorso_file)
+        if len(reader.pages) > 0:
+            testo_prima_pagina = reader.pages[0].extract_text() or ""
         for page in reader.pages:
             estratto = page.extract_text()
             if estratto:
-                testo += estratto + "\n"
+                testo_completo += estratto + "\n"
     except Exception as e:
         q.put(f"   [Errore Lettura] Impossibile aprire il file {nome_file}.")
         return None
         
-    if not testo.strip():
-        q.put(f"   [Avviso] Il PDF {nome_file} sembra una scansione/immagine. Quantità impostata a 0.")
-        return {
-            "nome_file": nome_file,
-            "mese": "Sconosciuto",
-            "anno": 2026,
-            "quantita": 0.0,
-            "unita_misura": ""
-        }
+    if not testo_prima_pagina.strip():
+        q.put(f"   [Avviso] La prima pagina del PDF {nome_file} è vuota o scansionata.")
         
-    testo_lower = testo.lower()
+    testo_p1_lower = testo_prima_pagina.lower()
+    testo_tot_lower = testo_completo.lower()
     
     # 1. Trova Mese e Anno
     mesi = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 
@@ -78,38 +75,37 @@ def estrai_dati_locale(percorso_file, categoria, q):
         
     if mese_trovato == "Sconosciuto":
         for m in mesi:
-            if m in testo_lower:
+            if m in testo_p1_lower:
                 mese_trovato = m.capitalize()
                 break
     if not match_anno:
-        match_anno_testo = re.search(r"(202\d)", testo_lower)
+        match_anno_testo = re.search(r"(202\d)", testo_p1_lower)
         if match_anno_testo:
             anno_trovato = int(match_anno_testo.group(1))
 
-    # 2. Estrazione Quantità e Unità di Misura (Parole chiave ampliate)
+    # 2. Estrazione Quantità e Unità di Misura focalizzata sulla PRIMA PAGINA
     quantita = 0.0
     unita_misura = ""
 
-    # Pattern estesi per catturare quantità, litri, kWh, totali, volumi ecc.
+    # Pattern estesi per catturare quantità, consumi, volumi, litri, kWh, ecc.
     patterns = [
-        r"(?:consum[oi]|quantit[aà]|q\.t[aà]|litri|totale|prelevata|erogata|volume|fatturat[oa]|quantita)[\s\S]{0,50}?([\d\.,]+)\s*([a-zA-Z€%]{1,6})?",
+        r"(?:consum[oi]|quantit[aà]|q\.t[aà]|litri|totale|prelevata|erogata|volume|fatturat[oa])[\s\S]{0,40}?([\d\.,]+)\s*([a-zA-Z€%]{1,6})?",
         r"([\d\.,]+)\s*(kwh|litri|lt|l|sm3|m3|mc|kg)"
     ]
 
     for pat in patterns:
-        matches = re.findall(pat, testo_lower)
+        matches = re.findall(pat, testo_p1_lower)
         if matches:
             for match in matches:
                 val_str = match[0] if isinstance(match, tuple) else match
                 unit_str = match[1] if isinstance(match, tuple) and len(match) > 1 else ""
                 
-                # Conversione formato numerico italiano (es. 1.234,56 -> 1234.56)
                 val_clean = val_str.replace('.', '').replace(',', '.')
                 try:
                     num = float(val_clean)
                     if num > 0:
                         quantita = num
-                        if unit_str and unit_str not in ['eur', '€', '%', 'iva']:
+                        if unit_str and unit_str not in ['eur', '€', '%', 'iva', 'di']:
                             unita_misura = unit_str.upper()
                         break
                 except:
@@ -117,22 +113,37 @@ def estrai_dati_locale(percorso_file, categoria, q):
             if quantita > 0:
                 break
 
-    # Se l'unità non è esplicita nel testo, diamo una mano di default in base alla categoria scelta
+    # Se l'unità non è esplicita sulla prima pagina, diamo un'impostazione di default logica
     if not unita_misura:
         if categoria == 'energia_elettrica':
             unita_misura = "kWh"
-        elif categoria == 'gasolio':
+        elif categoria == 'trasporti':
             unita_misura = "Litri"
 
-    q.put(f"   [OK] Estratto: {quantita} {unita_misura}")
+    # 3. Specifico per Trasporti: Rilevamento Gasolio vs Benzina
+    tipo_carburante = ""
+    if categoria == 'trasporti':
+        if any(w in testo_tot_lower for w in ['gasolio', 'diesel', 'f.o.', 'gas.']):
+            tipo_carburante = "Gasolio"
+        elif any(w in testo_tot_lower for w in ['benzina', 'verde', 'super']):
+            tipo_carburante = "Benzina"
+        else:
+            tipo_carburante = "Non specificato"
+
+    q.put(f"   [OK] Estratto: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
     
-    return {
+    risultato = {
         "nome_file": nome_file,
         "mese": mese_trovato,
         "anno": anno_trovato,
         "quantita": quantita,
         "unita_misura": unita_misura
     }
+    
+    if categoria == 'trasporti':
+        risultato["tipo_carburante"] = tipo_carburante
+
+    return risultato
 
 # ==========================================
 # 3. INTERFACCIA WEB (DASHBOARD AGGIORNATA)
@@ -175,7 +186,7 @@ HTML_PAGE = """
 <body>
     <div class="container">
         <div class="box">
-            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Estrazione Dati Pura & Locale</small></h2>
+            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Analisi Prima Pagina & Estrazione Pura</small></h2>
             
             <label>Nome Azienda/Cliente (senza spazi):</label>
             <input type="text" id="nome_cliente" placeholder="es. ditta_rossi" required>
@@ -191,14 +202,13 @@ HTML_PAGE = """
                 </div>
                 
                 <div class="card">
-                    <h3>Ambiente - Gasolio</h3>
-                    <p style="color: #666; font-size: 0.9em;">Estrai le fatture del gasolio in un file Excel dedicato.</p>
-                    <button class="btn" onclick="avviaEstrazione('gasolio')">Avvia Gasolio</button>
+                    <h3>Ambiente - Trasporti</h3>
+                    <p style="color: #666; font-size: 0.9em;">Estrai le fatture di carburante (Gasolio/Benzina) in un file Excel dedicato.</p>
+                    <button class="btn" onclick="avviaEstrazione('trasporti')">Avvia Trasporti</button>
                 </div>
             </div>
         </div>
 
-        <!-- Form nascosto per inviare la richiesta al server Flask -->
         <form id="hiddenForm" action="/avvia" method="POST" style="display: none;">
             <input type="hidden" name="nome_cliente" id="form_cliente">
             <input type="hidden" name="percorso_root" id="form_percorso">
@@ -229,7 +239,6 @@ def avvia_processo():
 
             q.put(f"Inizializzazione estrazione per: {categoria.replace('_', ' ').upper()}")
             
-            # Individua la cartella specifica della categoria
             cartella_target = trova_cartella_categoria(percorso_root, categoria)
             q.put(f"Cartella analizzata: {cartella_target}")
 
@@ -244,7 +253,7 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            q.put(f"Trovati {len(file_paths)} file PDF. Estrazione dati in corso...")
+            q.put(f"Trovati {len(file_paths)} file PDF. Analisi prima pagina in corso...")
 
             dati_estratti = []
             for p in file_paths:
@@ -254,7 +263,6 @@ def avvia_processo():
 
             q.put("\n--- Generazione file Excel sul Desktop ---")
             desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-            # Nome file specifico per utenza/categoria
             nome_file_excel = os.path.join(desktop_path, f"Report_{categoria.capitalize()}_{nome_cliente}.xlsx")
 
             with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
@@ -295,7 +303,7 @@ def avvia_processo():
         </head>
         <body>
             <div class="box">
-                <h2>Elaborazione {categoria.replace('_', ' ').title()} <br><small style="color:#666; font-size:0.6em;">Estrazione Dati Pura</small></h2>
+                <h2>Elaborazione {categoria.replace('_', ' ').title()} <br><small style="color:#666; font-size:0.6em;">Analisi Mirata Prima Pagina</small></h2>
                 <div id="log-box"></div>
                 <div id="result-area"></div>
             </div>
