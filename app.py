@@ -38,17 +38,14 @@ def analizza_file_trasporti(cartella):
     
     file_list = []
     for root_dir, _, files in os.walk(cartella):
-        # Controlla se il percorso corrente o la cartella padre contiene parole chiave relative ai trasporti
         path_lower = root_dir.lower()
         is_target_dir = any(kw in path_lower for kw in target_keywords)
         
         for filename in files:
             if filename.lower().endswith(valid_extensions):
-                # Se ci troviamo in una sottocartella mirata OPPURE se il nome del file contiene parole chiave
                 if is_target_dir or any(kw in filename.lower() for kw in target_keywords):
                     file_list.append((root_dir, filename))
                     
-    # Se non trova sottocartelle specifiche, esegue il fallback sull'intera cartella per non bloccare l'estrazione
     if not file_list:
         for root_dir, _, files in os.walk(cartella):
             for filename in files:
@@ -123,29 +120,71 @@ def _process_energia_elettrica():
         ext = filename.lower()
         quantita = "Non rilevato"
         unita_misura = "kWh"
+        periodo = "Non rilevato"
+        anno = "Non rilevato"
         text = ""
+        
         try:
             if ext.endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
-                    if pdf.pages:
-                        text = pdf.pages[0].extract_text() or ""
+                    if len(pdf.pages) > 0:
+                        page = pdf.pages[0]
+                        text = page.extract_text() or ""
+                        if text:
+                            text_lower = text.lower()
+                            if "energia elettrica" in text_lower or "kwh" in text_lower:
+                                periodot, annot = estrai_mesi_e_anno(text, text_lower)
+                                if periodot != "Non rilevato": periodo = periodot
+                                if annot != "Non rilevato": anno = annot
+
+                                # Estrazione avanzata con esclusione delle fasce F1, F2, F3
+                                try:
+                                    words = page.extract_words(extra_attrs=["size"])
+                                    candidates = []
+                                    for i, word in enumerate(words):
+                                        w_text = word['text']
+                                        if re.match(r'^(?:kWh|KWh|KWH)$', w_text):
+                                            for j in range(max(0, i-3), i):
+                                                prev_word = words[j]['text']
+                                                clean_prev = prev_word.replace('.', '').replace(',', '.')
+                                                if re.match(r'^\d+[\.,]?\d*$', clean_prev):
+                                                    is_band = False
+                                                    for k in range(max(0, j-2), min(len(words), j+3)):
+                                                        if re.match(r'^F[1-3]$', words[k]['text'], re.IGNORECASE):
+                                                            is_band = True
+                                                            break
+                                                    if not is_band:
+                                                        candidates.append({
+                                                            'valore': prev_word,
+                                                            'size': words[j].get('size', 0)
+                                                        })
+                                    if candidates:
+                                        candidates.sort(key=lambda x: x['size'], reverse=True)
+                                        quantita = candidates[0]['valore']
+                                    else:
+                                        match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
+                                        if match_kwh:
+                                            quantita = match_kwh.group(1)
+                                except Exception:
+                                    match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
+                                    if match_kwh:
+                                        quantita = match_kwh.group(1)
             elif ext.endswith(('.jpg', '.jpeg', '.png')):
                 text = pytesseract.image_to_string(Image.open(file_path)) or ""
+                if text:
+                    text_lower = text.lower()
+                    if "energia elettrica" in text_lower or "kwh" in text_lower:
+                        periodo, anno = estrai_mesi_e_anno(text, text_lower)
+                        match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
+                        if match_kwh:
+                            quantita = match_kwh.group(1)
 
-            if text:
-                text_lower = text.lower()
-                if "energia elettrica" in text_lower or "kwh" in text_lower:
-                    periodo, anno = estrai_mesi_e_anno(text, text_lower)
-                    match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
-                    if match_kwh:
-                        quantita = match_kwh.group(1)
-
-                if quantita != "Non rilevato":
-                    row_idx = ws.max_row + 1
-                    ws.append([azienda, filename, periodo, anno, quantita, unita_misura])
-                    ws.cell(row=row_idx, column=2).hyperlink = os.path.abspath(file_path)
-                    ws.cell(row=row_idx, column=2).font = Font(color="0563C1", underline="single")
-                    valid_count += 1
+            if quantita != "Non rilevato":
+                row_idx = ws.max_row + 1
+                ws.append([azienda, filename, periodo, anno, quantita, unita_misura])
+                ws.cell(row=row_idx, column=2).hyperlink = os.path.abspath(file_path)
+                ws.cell(row=row_idx, column=2).font = Font(color="0563C1", underline="single")
+                valid_count += 1
         except Exception:
             pass
 
@@ -171,7 +210,6 @@ def _process_trasporti():
         messagebox.showerror("Errore", "Inserisci il nome dell'azienda e seleziona una cartella valida.")
         return
 
-    # Utilizza la ricerca mirata nelle cartelle di trasporto (Gasolio, Benzina, Auto, Trasporti, ecc.)
     file_list = analizza_file_trasporti(cartella)
     if not file_list:
         messagebox.showwarning("Attenzione", "Nessun file valido trovato nelle cartelle di trasporto.")
@@ -214,8 +252,6 @@ def _process_trasporti():
 
             if text:
                 text_lower = text.lower()
-                
-                # Determinazione tipo carburante (controlla anche il percorso della cartella)
                 combined_text = f"{root_dir} {text_lower}"
                 if "benzina" in combined_text:
                     carburante = "Benzina"
@@ -224,7 +260,6 @@ def _process_trasporti():
 
                 periodo, anno = estrai_mesi_e_anno(text, text_lower)
 
-                # 1. Cerca prima con unità esplicita (litri, L, mc, smc)
                 match_qty_unit = re.search(r'(\d+[\.,]?\d*)\s*(litri|Litri|L|litro|mc|MC|Smc|SMC|smc)', text)
                 if match_qty_unit:
                     quantita = match_qty_unit.group(1)
@@ -234,7 +269,6 @@ def _process_trasporti():
                     else:
                         unita_misura = "Litri"
                 else:
-                    # 2. Cerca sotto la voce "quantità", "q.tà", "q,tà", "qta"
                     match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,15}(\d+[\.,]?\d*)', text_lower)
                     if match_label:
                         quantita = match_label.group(1)
