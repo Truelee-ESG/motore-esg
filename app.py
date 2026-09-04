@@ -11,14 +11,8 @@ from flask import Flask, request, render_template_string, Response
 
 app = Flask(__name__)
 
-MESI_ORDINE = {
-    'Gennaio': 1, 'Febbraio': 2, 'Marzo': 3, 'Aprile': 4,
-    'Maggio': 5, 'Giugno': 6, 'Luglio': 7, 'Agosto': 8,
-    'Settembre': 9, 'Ottobre': 10, 'Novembre': 11, 'Dicembre': 12
-}
-
 # ==========================================
-# 1. RICERCA CARTELLA E ESTRAZIONE SOLO CONSUMO
+# 1. RICERCA CARTELLA PER CATEGORIA
 # ==========================================
 def trova_cartella_categoria(percorso_root, categoria):
     percorso_root = percorso_root.strip('"\'').strip()
@@ -37,9 +31,12 @@ def trova_cartella_categoria(percorso_root, categoria):
                     return os.path.join(root, directory)
     return candidata
 
+# ==========================================
+# 2. MOTORE DI ESTRAZIONE PURA (PRIMA PAGINA)
+# ==========================================
 def estrai_dati_locale(percorso_file, categoria, q):
     nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Ricerca esclusiva consumo: {nome_file}")
+    q.put(f" -> Analisi prima pagina: {nome_file}")
     
     testo_prima_pagina = ""
     testo_completo = ""
@@ -52,12 +49,13 @@ def estrai_dati_locale(percorso_file, categoria, q):
             if estratto:
                 testo_completo += estratto + "\n"
     except Exception:
-        q.put(f"   [Errore Lettura] Impossibile aprire il file {nome_file}.")
+        q.put(f"   [Errore] Impossibile leggere {nome_file}.")
         return None
         
     testo_p1_lower = testo_prima_pagina.lower()
     testo_tot_lower = testo_completo.lower()
     
+    # Rilevamento Mese e Anno
     mesi = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 
             'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre']
     mese_trovato = "Gennaio"
@@ -82,19 +80,20 @@ def estrai_dati_locale(percorso_file, categoria, q):
         if match_anno_testo:
             anno_trovato = int(match_anno_testo.group(1))
 
+    # Estrazione mirata del solo consumo sulla prima pagina
     quantita = 0.0
     unita_misura = ""
 
     if categoria == 'energia_elettrica':
         unita_misura = "kWh"
         patterns = [
-            r"(?:consumo|energia attiva|prelevata|totale\s*kwh|kwh\s*totali|attiva)[\s\S]{0,30}?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)",
+            r"(?:consumo|energia attiva|prelevata|attiva|totale\s*kwh|kwh\s*totali)[\s\S]{0,30}?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)",
             r"(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)\s*kwh"
         ]
     elif categoria == 'trasporti':
         unita_misura = "Litri"
         patterns = [
-            r"(?:quantit[aà]|q\.t[aà]|litri|volume|erogata|totale\s*litri)[\s\S]{0,30}?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)",
+            r"(?:quantit[aà]|q\.t[aà]|litri|volume|erogata)[\s\S]{0,30}?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)",
             r"(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)\s*(?:litri|lt|l)"
         ]
     else:
@@ -109,7 +108,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
                 val_clean = val_str.replace('.', '').replace(',', '.')
                 try:
                     num = float(val_clean)
-                    if num > 5:
+                    if num > 5:  # Scarta numeri troppo piccoli o irrilevanti
                         quantita = num
                         break
                 except:
@@ -117,6 +116,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
             if quantita > 0:
                 break
 
+    # Rilevamento Carburante per Trasporti
     tipo_carburante = ""
     if categoria == 'trasporti':
         if any(w in testo_tot_lower for w in ['gasolio', 'diesel', 'f.o.', 'gas.']):
@@ -126,7 +126,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
         else:
             tipo_carburante = "Non specificato"
 
-    q.put(f"   [OK] Consumo estratto: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
+    q.put(f"   [OK] Consumo: {quantita} {unita_misura}" + (f" ({tipo_carburante})" if tipo_carburante else ""))
     
     risultato = {
         "Mese": mese_trovato,
@@ -137,56 +137,51 @@ def estrai_dati_locale(percorso_file, categoria, q):
     }
     if categoria == 'trasporti':
         risultato["Tipo_Carburante"] = tipo_carburante
+        
     return risultato
 
 # ==========================================
-# 2. INTERFACCIA WEB (DASHBOARD)
+# 3. INTERFACCIA WEB PULITA
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Dashboard ESG & Report Dinamici</title>
+    <title>Motore ESG - Estrazione Locale</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 30px; color: #333;}
-        .container { max-width: 950px; margin: 0 auto; }
-        .box { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 25px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 40px; color: #333;}
+        .container { max-width: 900px; margin: 0 auto; }
+        .box { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
         input { width: 100%; padding: 12px; margin: 8px 0 20px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .card { background: #fafbfc; padding: 25px; border-radius: 8px; border: 1px solid #e1e4e8; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.03); }
         .card h3 { margin-top: 0; color: #2e7d32; }
         .btn { padding: 12px 20px; background: #2e7d32; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 1em; width: 100%; margin-top: 15px; transition: background 0.3s; }
         .btn:hover { background: #1b5e20; }
-        .btn-report { background: #1a73e8; }
-        .btn-report:hover { background: #1557b0; }
         h2 { text-align: center; color: #2e7d32; margin-top: 0; }
         label { font-weight: bold; font-size: 0.9em; color: #333; display: block; text-align: left; }
-        hr { border: 0; border-top: 1px solid #eee; margin: 25px 0; }
     </style>
     <script>
         function avviaEstrazione(categoria) {
             const cliente = document.getElementById('nome_cliente').value.trim();
             const percorso = document.getElementById('percorso_root').value.trim();
-            if(!cliente || !percorso) { alert("Inserisci prima il Nome Azienda/Cliente e il Percorso!"); return; }
+            
+            if(!cliente || !percorso) {
+                alert("Inserisci prima il Nome Azienda/Cliente e il Percorso della cartella!");
+                return;
+            }
+            
             document.getElementById('form_cliente').value = cliente;
             document.getElementById('form_percorso').value = percorso;
             document.getElementById('form_categoria').value = categoria;
-            document.getElementById('hiddenForm').action = "/avvia";
             document.getElementById('hiddenForm').submit();
-        }
-
-        function generaReport() {
-            const cliente = document.getElementById('nome_cliente').value.trim();
-            if(!cliente) { alert("Inserisci il Nome Azienda/Cliente per generare il report!"); return; }
-            document.getElementById('report_cliente').value = cliente;
-            document.getElementById('reportForm').submit();
         }
     </script>
 </head>
 <body>
     <div class="container">
         <div class="box">
-            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Estrazione Consumi & Reportistica Dinamica</small></h2>
+            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Estrazione Consumi 100% Locale</small></h2>
             
             <label>Nome Azienda/Cliente (senza spazi):</label>
             <input type="text" id="nome_cliente" placeholder="es. ditta_rossi" required>
@@ -197,23 +192,15 @@ HTML_PAGE = """
             <div class="grid">
                 <div class="card">
                     <h3>Ambiente - Energia Elettrica</h3>
-                    <p style="color: #666; font-size: 0.9em;">Estrai solo i kWh di consumo.</p>
-                    <button class="btn" onclick="avviaEstrazione('energia_elettrica')">Estrai Energia Elettrica</button>
+                    <p style="color: #666; font-size: 0.9em;">Estrai solo i kWh di consumo dalla prima pagina.</p>
+                    <button class="btn" onclick="avviaEstrazione('energia_elettrica')">Avvia Energia Elettrica</button>
                 </div>
                 
                 <div class="card">
                     <h3>Ambiente - Trasporti</h3>
-                    <p style="color: #666; font-size: 0.9em;">Estrai solo i litri di carburante.</p>
-                    <button class="btn" onclick="avviaEstrazione('trasporti')">Estrai Trasporti</button>
+                    <p style="color: #666; font-size: 0.9em;">Estrai litri e tipo carburante dalla prima pagina.</p>
+                    <button class="btn" onclick="avviaEstrazione('trasporti')">Avvia Trasporti</button>
                 </div>
-            </div>
-
-            <hr>
-
-            <div style="text-align: center;">
-                <h3 style="color: #1a73e8; margin-bottom: 5px;">Report & Grafici Dinamici</h3>
-                <p style="color: #666; font-size: 0.9em; margin-top:0;">Crea il report interattivo con grafici e variazioni mensili.</p>
-                <button class="btn btn-report" style="max-width: 350px;" onclick="generaReport()">Genera Report Interattivo</button>
             </div>
         </div>
 
@@ -221,10 +208,6 @@ HTML_PAGE = """
             <input type="hidden" name="nome_cliente" id="form_cliente">
             <input type="hidden" name="percorso_root" id="form_percorso">
             <input type="hidden" name="categoria" id="form_categoria">
-        </form>
-
-        <form id="reportForm" action="/genera_report_interattivo" method="POST" style="display: none;">
-            <input type="hidden" name="nome_cliente" id="report_cliente">
         </form>
     </div>
 </body>
@@ -249,7 +232,8 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            q.put(f"Inizializzazione estrazione consumi per: {categoria.replace('_', ' ').upper()}")
+            q.put(f"Inizializzazione estrazione per: {categoria.replace('_', ' ').upper()}")
+            
             cartella_target = trova_cartella_categoria(percorso_root, categoria)
             q.put(f"Cartella analizzata: {cartella_target}")
 
@@ -264,7 +248,7 @@ def avvia_processo():
                 q.put(("DONE", None))
                 return
 
-            q.put(f"Trovati {len(file_paths)} file PDF. Estrazione consumi in corso...")
+            q.put(f"Trovati {len(file_paths)} file PDF. Estrazione in corso...")
 
             dati_estratti = []
             for p in file_paths:
@@ -336,132 +320,6 @@ def avvia_processo():
                 yield f"<script>appendLog('{safe_msg}');</script>\n"
 
     return Response(generate(), mimetype='text/html')
-
-# ==========================================
-# 3. GENERAZIONE REPORT INTERATTIVO CON CHART.JS
-# ==========================================
-@app.route('/genera_report_interattivo', methods=['POST'])
-def genera_report_interattivo():
-    nome_cliente = request.form['nome_cliente'].strip()
-    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-    
-    file_ee = os.path.join(desktop_path, f"Report_Energia_elettrica_{nome_cliente}.xlsx")
-    file_tr = os.path.join(desktop_path, f"Report_Trasporti_{nome_cliente}.xlsx")
-    
-    # Dati per Energia Elettrica
-    labels_ee, data_ee, table_ee = [], [], ""
-    if os.path.exists(file_ee):
-        df_ee = pd.read_excel(file_ee)
-        if not df_ee.empty and 'Quantita' in df_ee.columns:
-            df_ee['NumMese'] = df_ee['Mese'].map(MESI_ORDINE).fillna(1)
-            df_ee = df_ee.sort_values(by=['Anno', 'NumMese'])
-            df_ee['Etichetta'] = df_ee['Mese'] + ' ' + df_ee['Anno'].astype(str)
-            df_ee['Var_MoM'] = df_ee['Quantita'].diff()
-            df_ee['Var_MoM_%'] = df_ee['Quantita'].pct_change() * 100
-            
-            labels_ee = df_ee['Etichetta'].tolist()
-            data_ee = df_ee['Quantita'].tolist()
-            table_ee = df_ee[['Etichetta', 'Quantita', 'Unita_Misura', 'Var_MoM', 'Var_MoM_%']].to_html(index=False, classes='table', float_format=lambda x: f"{x:.2f}" if pd.notnull(x) else "-")
-
-    # Dati per Trasporti
-    labels_tr, data_tr, table_tr = [], [], ""
-    if os.path.exists(file_tr):
-        df_tr = pd.read_excel(file_tr)
-        if not df_tr.empty and 'Quantita' in df_tr.columns:
-            df_tr['NumMese'] = df_tr['Mese'].map(MESI_ORDINE).fillna(1)
-            df_tr = df_tr.sort_values(by=['Anno', 'NumMese'])
-            df_tr['Etichetta'] = df_tr['Mese'] + ' ' + df_tr['Anno'].astype(str)
-            df_tr['Var_MoM'] = df_tr['Quantita'].diff()
-            df_tr['Var_MoM_%'] = df_tr['Quantita'].pct_change() * 100
-            
-            labels_tr = df_tr['Etichetta'].tolist()
-            data_tr = df_tr['Quantita'].tolist()
-            table_tr = df_tr[['Etichetta', 'Quantita', 'Unita_Misura', 'Tipo_Carburante', 'Var_MoM', 'Var_MoM_%']].to_html(index=False, classes='table', float_format=lambda x: f"{x:.2f}" if pd.notnull(x) else "-")
-
-    report_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Report ESG - {nome_cliente}</title>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <style>
-            body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f4f6f9; margin: 0; padding: 30px; color: #333; }}
-            .container {{ max-width: 900px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
-            h1 {{ color: #2e7d32; border-bottom: 2px solid #2e7d32; padding-bottom: 10px; margin-top: 0; }}
-            h2 {{ color: #1a73e8; margin-top: 40px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }}
-            .chart-box {{ position: relative; width: 100%; height: 350px; margin: 20px 0; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9em; }}
-            th, td {{ border: 1px solid #ddd; padding: 10px; text-align: center; }}
-            th {{ background-color: #f2f2f2; font-weight: bold; }}
-            tr:nth-child(even) {{ background-color: #fafafa; }}
-            .btn-print {{ display: block; width: 100%; max-width: 250px; margin: 40px auto 0 auto; background: #1a73e8; color: white; border: none; padding: 12px; border-radius: 4px; font-weight: bold; font-size: 1.1em; cursor: pointer; text-align: center; text-decoration: none; }}
-            .btn-print:hover {{ background: #1557b0; }}
-            @media print {{
-                .btn-print, .no-print {{ display: none; }}
-                body {{ background: white; padding: 0; }}
-                .container {{ box-shadow: none; padding: 0; max-width: 100%; }}
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Report Sostenibilità & Consumi ESG</h1>
-            <p>Cliente: <b>{nome_cliente}</b></p>
-            
-            {f'<h2>Energia Elettrica (kWh)</h2><div class="chart-box"><canvas id="chartEE"></canvas></div>{table_ee}' if labels_ee else ''}
-            {f'<h2>Trasporti & Carburanti (Litri)</h2><div class="chart-box"><canvas id="chartTR"></canvas></div>{table_tr}' if labels_tr else ''}
-            
-            <button class="btn-print" onclick="window.print()">Salva in PDF / Stampa</button>
-            <div style="text-align: center; margin-top: 15px;" class="no-print">
-                <a href="/" style="color: #666; text-decoration: none; font-size: 0.9em;">&larr; Torna alla Home</a>
-            </div>
-        </div>
-
-        <script>
-            if ('{labels_ee}' !== '') {{
-                const ctxEE = document.getElementById('chartEE').getContext('2d');
-                new Chart(ctxEE, {{
-                    type: 'line',
-                    data: {{
-                        labels: {json.dumps(labels_ee)},
-                        datasets: [{{
-                            label: 'Consumo kWh',
-                            data: {json.dumps(data_ee)},
-                            borderColor: '#2e7d32',
-                            backgroundColor: 'rgba(46, 125, 50, 0.1)',
-                            borderWidth: 3,
-                            fill: true,
-                            tension: 0.2
-                        }}]
-                    }},
-                    options: {{ responsive: true, maintainAspectRatio: false }}
-                }});
-            }}
-
-            if ('{labels_tr}' !== '') {{
-                const ctxTR = document.getElementById('chartTR').getContext('2d');
-                new Chart(ctxTR, {{
-                    type: 'line',
-                    data: {{
-                        labels: {json.dumps(labels_tr)},
-                        datasets: [{{
-                            label: 'Quantità Litri',
-                            data: {json.dumps(data_tr)},
-                            borderColor: '#1a73e8',
-                            backgroundColor: 'rgba(26, 115, 232, 0.1)',
-                            borderWidth: 3,
-                            fill: true,
-                            tension: 0.2
-                        }}]
-                    }},
-                    options: {{ responsive: true, maintainAspectRatio: false }}
-                }});
-            }}
-        </script>
-    </body>
-    </html>
-    """
-    return report_html
 
 if __name__ == '__main__':
     threading.Timer(1.0, lambda: webbrowser.open('http://127.0.0.1:5000')).start()
