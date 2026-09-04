@@ -1,9 +1,11 @@
 import os
 import re
+from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import pdfplumber
 import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
 
 def analizza_bollette(azienda, cartella, status_label):
     if not azienda or not cartella:
@@ -28,10 +30,33 @@ def analizza_bollette(azienda, cartella, status_label):
     ws = wb.active
     ws.title = "Consumi Elettrici"
     
-    ws.append(["Azienda", "Nome File", "Percorso", "Consumo (kWh)"])
+    # Intestazione del report in alto con data e ora correnti del PC
+    current_time_str = datetime.now().strftime("%d/%m/%Y alle %H:%M")
+    ws.append([f"Estrazione dati dalle bollette in data {current_time_str}"])
+    ws.cell(row=1, column=1).font = Font(size=12, bold=True, color="1F497D")
     
-    for col in range(1, 5):
-        ws.cell(row=1, column=col).font = openpyxl.styles.Font(bold=True)
+    # Riga vuota di separazione
+    ws.append([])
+    
+    # Intestazioni tabella
+    headers = ["Azienda", "Nome File", "Periodo", "Anno", "Consumo (kWh)"]
+    ws.append(headers)
+    
+    header_row_idx = 3
+    for col in range(1, len(headers) + 1):
+        cell = ws.cell(row=header_row_idx, column=col)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    mesi_mappa = {
+        'gennaio': 'Gennaio', 'febbraio': 'Febbraio', 'marzo': 'Marzo', 'aprile': 'Aprile',
+        'maggio': 'Maggio', 'giugno': 'Giugno', 'luglio': 'Luglio', 'agosto': 'Agosto',
+        'settembre': 'Settembre', 'ottobre': 'Ottobre', 'novembre': 'Novembre', 'dicembre': 'Dicembre',
+        'gen': 'Gen', 'feb': 'Feb', 'mar': 'Mar', 'apr': 'Apr',
+        'mag': 'Mag', 'giu': 'Giu', 'lug': 'Lug', 'ago': 'Ago',
+        'set': 'Set', 'ott': 'Ott', 'nov': 'Nov', 'dic': 'Dic'
+    }
 
     success_count = 0
     total_files = len(pdf_files)
@@ -40,9 +65,11 @@ def analizza_bollette(azienda, cartella, status_label):
     for root_dir, filename in pdf_files:
         file_path = os.path.join(root_dir, filename)
         abs_path = os.path.abspath(file_path)
-        rel_path = os.path.relpath(file_path, cartella)
         
         consumo = "Non rilevato"
+        periodo = "Non rilevato"
+        anno = "Non rilevato"
+        
         try:
             with pdfplumber.open(file_path) as pdf:
                 if len(pdf.pages) > 0:
@@ -51,21 +78,36 @@ def analizza_bollette(azienda, cartella, status_label):
                     if text:
                         text_lower = text.lower()
                         if "energia elettrica" in text_lower or "kwh" in text_lower:
-                            # Estrazione avanzata basata su parole, dimensione carattere e filtro fasce F1/F2/F3
+                            
+                            # 1. Estrazione Anno
+                            years = re.findall(r'\b(20\d{2})\b', text)
+                            if years:
+                                anno = years[0]
+                                
+                            # 2. Estrazione Periodo (Mesi)
+                            found_mesi = []
+                            for m_key, m_val in mesi_mappa.items():
+                                if re.search(r'\b' + m_key + r'\b', text_lower):
+                                    if m_val not in found_mesi:
+                                        found_mesi.append(m_val)
+                            if found_mesi:
+                                if len(found_mesi) == 1:
+                                    periodo = found_mesi[0]
+                                else:
+                                    periodo = f"{found_mesi[0]} - {found_mesi[-1]}"
+
+                            # 3. Estrazione Consumo (kWh) con logica dimensione carattere e filtro F1/F2/F3
                             try:
                                 words = page.extract_words(extra_attrs=["size"])
                                 candidates = []
                                 
                                 for i, word in enumerate(words):
                                     w_text = word['text']
-                                    # Cerca l'unità di misura kWh
                                     if re.match(r'^(?:kWh|KWh|KWH)$', w_text):
-                                        # Cerca il numero nelle parole immediatamente precedenti
                                         for j in range(max(0, i-3), i):
                                             prev_word = words[j]['text']
                                             clean_prev = prev_word.replace('.', '').replace(',', '.')
                                             if re.match(r'^\d+[\.,]?\d*$', clean_prev):
-                                                # Controllo anti-fasce: evita se F1, F2 o F3 sono vicini
                                                 is_band = False
                                                 for k in range(max(0, j-2), min(len(words), j+3)):
                                                     if re.match(r'^F[1-3]$', words[k]['text'], re.IGNORECASE):
@@ -78,11 +120,9 @@ def analizza_bollette(azienda, cartella, status_label):
                                                     })
                                                     
                                 if candidates:
-                                    # Seleziona prioritariamente il carattere più grande (solitamente il totale in evidenza)
                                     candidates.sort(key=lambda x: x['size'], reverse=True)
                                     consumo = candidates[0]['valore']
                                 else:
-                                    # Fallback di sicurezza basato su regex se il layout grafico non è standard
                                     match_kwh = re.search(r'(\d+[\.,]?\d*)\s*(?:kWh|KWh|KWH)', text)
                                     if match_kwh:
                                         consumo = match_kwh.group(1)
@@ -93,11 +133,12 @@ def analizza_bollette(azienda, cartella, status_label):
 
                             if consumo != "Non rilevato":
                                 row_idx = ws.max_row + 1
-                                ws.append([azienda, filename, rel_path, consumo])
+                                ws.append([azienda, filename, periodo, anno, consumo])
                                 
-                                cell = ws.cell(row=row_idx, column=2)
-                                cell.hyperlink = abs_path
-                                cell.font = openpyxl.styles.Font(color="0563C1", underline="single")
+                                # Hyperlink sul nome file (Colonna 2)
+                                cell_file = ws.cell(row=row_idx, column=2)
+                                cell_file.hyperlink = abs_path
+                                cell_file.font = Font(color="0563C1", underline="single")
                                 
                                 valid_count += 1
         except Exception:
