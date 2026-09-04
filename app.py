@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import threading
 import webbrowser
 import pandas as pd
@@ -48,10 +47,15 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
 # 2. LOGICA ESTRAZIONE E CONVERSIONE
 # ==========================================
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
-    file_caricato = genai.upload_file(percorso_file)
-    while file_caricato.state.name == 'PROCESSING':
-        time.sleep(2)
-        file_caricato = genai.get_file(file_caricato.name)
+    # Invece di usare le API di upload (che causano l'errore HttpError nell'eseguibile),
+    # leggiamo il file in memoria e lo mandiamo direttamente a Gemini in formato bytes.
+    with open(percorso_file, "rb") as doc_file:
+        pdf_bytes = doc_file.read()
+        
+    pdf_part = {
+        "mime_type": "application/pdf",
+        "data": pdf_bytes
+    }
         
     model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
@@ -60,12 +64,8 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
     {{"mese": "gennaio", "anno": 2026, "consumo": 120.5, "unita_misura": "sm3", "tipo_gas": "metano"}}
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
-    response = model.generate_content([prompt, file_caricato])
     
-    try:
-        genai.delete_file(file_caricato.name) 
-    except Exception:
-        pass
+    response = model.generate_content([prompt, pdf_part])
         
     testo_pulito = response.text.strip().replace('```json', '').replace('```', '').strip()
     return json.loads(testo_pulito)
