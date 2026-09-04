@@ -84,7 +84,6 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
         }
         headers = {"Content-Type": "application/json"}
         
-        # Tentativi multipli (retry) per gestire picchi di traffico temporanei (503 / 429)
         tentativi = 3
         successo = False
         data_risposta = None
@@ -97,14 +96,13 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta, api_key):
                     successo = True
                     break
                 elif response.status_code in [503, 429]:
-                    # Errore di sovraccarico temporaneo: attende qualche secondo e riprova
                     time.sleep(3 * (tentativo + 1))
                     ultimo_errore = response.text
                     continue
                 else:
                     ultimo_errore = response.text
                     if "404" in str(response.status_code) or "NotFound" in response.text:
-                        break # Modello non trovato, passa al prossimo modello
+                        break
                     else:
                         raise Exception(f"HTTP {response.status_code}: {response.text}")
             except requests.exceptions.RequestException as e:
@@ -231,7 +229,10 @@ def avvia_processo():
             </div>
             """, 400
 
-        nome_file_excel = f"Report_Consumi_{nome_cliente}.xlsx"
+        # Salvataggio diretto sul Desktop del computer
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        nome_file_excel = os.path.join(desktop_path, f"Report_Consumi_{nome_cliente}.xlsx")
+
         with pd.ExcelWriter(nome_file_excel, engine='openpyxl') as writer:
             if dati_ee:
                 pd.DataFrame(dati_ee).to_excel(writer, sheet_name='Energia_Elettrica', index=False)
@@ -245,7 +246,7 @@ def avvia_processo():
             <h3 style="color: #2e7d32; font-size: 1.5em;">Processo Completato con Successo!</h3>
             <p style="color: #555;">{msg_ricerca}</p>
             <p style="color: #555;">Documenti analizzati e convertiti in kWh.</p>
-            <p style="font-size: 1.1em;">File Excel generato: <b>{nome_file_excel}</b></p>
+            <p style="font-size: 1.1em;">File Excel salvato direttamente sul tuo <b>Desktop</b>:<br><code>{nome_file_excel}</code></p>
             <br>
             <a href="/" style="background: #1a73e8; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Torna alla home</a>
         </div>
