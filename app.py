@@ -44,10 +44,19 @@ def trova_e_memorizza_cartelle(percorso_root, nome_cliente, api_key_inserita):
     return config, f"Configurazione salvata in {nome_file_config}"
 
 # ==========================================
-# 2. LOGICA ESTRAZIONE E CONVERSIONE
+# 2. LOGICA ESTRAZIONE DINAMICA
 # ==========================================
+def trova_modello_compatibile():
+    """Interroga Google per trovare automaticamente un modello attivo per la chiave inserita"""
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                return m.name
+    except Exception:
+        pass
+    return 'gemini-1.5-flash'  # Fallback predefinito
+
 def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
-    # Leggiamo il PDF direttamente in memoria
     with open(percorso_file, "rb") as doc_file:
         pdf_bytes = doc_file.read()
         
@@ -63,26 +72,14 @@ def estrai_dati_da_pdf(percorso_file, tipo_bolletta):
     Se l'unità di misura è kWh, inserisci "kWh". Se è energia elettrica, tipo_gas deve essere vuoto "".
     """
     
-    # Selettore dinamico dei modelli (dal più recente) per bypassare errori 404
-    modelli_supportati = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash-latest']
-    ultimo_errore = None
+    # Selezione automatica del modello disponibile
+    nome_modello = trova_modello_compatibile()
     
-    for nome_modello in modelli_supportati:
-        try:
-            model = genai.GenerativeModel(nome_modello)
-            response = model.generate_content([prompt, pdf_part])
-            testo_pulito = response.text.strip().replace('```json', '').replace('```', '').strip()
-            return json.loads(testo_pulito)
-        except Exception as e:
-            ultimo_errore = e
-            # Se il modello non è trovato (404), passa al successivo. Altrimenti blocca e mostra l'errore.
-            if "404" in str(e) or "NotFound" in str(e):
-                continue
-            else:
-                raise e
-                
-    # Se nessun modello funziona, restituiamo l'ultimo errore registrato
-    raise ultimo_errore
+    model = genai.GenerativeModel(nome_modello)
+    response = model.generate_content([prompt, pdf_part])
+        
+    testo_pulito = response.text.strip().replace('```json', '').replace('```', '').strip()
+    return json.loads(testo_pulito)
 
 def converti_in_kwh(dati):
     try:
