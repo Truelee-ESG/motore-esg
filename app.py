@@ -32,11 +32,11 @@ def trova_cartella_categoria(percorso_root, categoria):
     return candidata
 
 # ==========================================
-# 2. MOTORE DI ESTRAZIONE PRIMA PAGINA (LOCALE)
+# 2. MOTORE DI ESTRAZIONE POTENZIATO (PRIMA PAGINA)
 # ==========================================
 def estrai_dati_locale(percorso_file, categoria, q):
     nome_file = os.path.basename(percorso_file)
-    q.put(f" -> Analisi prima pagina: {nome_file}")
+    q.put(f" -> Analisi approfondita prima pagina: {nome_file}")
     
     testo_prima_pagina = ""
     testo_completo = ""
@@ -58,7 +58,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
     testo_p1_lower = testo_prima_pagina.lower()
     testo_tot_lower = testo_completo.lower()
     
-    # 1. Trova Mese e Anno
+    # --- 1. TROVA MESE E ANNO ---
     mesi = ['gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 'giugno', 
             'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre']
     mese_trovato = "Sconosciuto"
@@ -83,44 +83,55 @@ def estrai_dati_locale(percorso_file, categoria, q):
         if match_anno_testo:
             anno_trovato = int(match_anno_testo.group(1))
 
-    # 2. Estrazione Quantità e Unità di Misura focalizzata sulla PRIMA PAGINA
+    # --- 2. ESTRAZIONE QUANTITÀ E UNITÀ MIRATA SULLA PRIMA PAGINA ---
     quantita = 0.0
     unita_misura = ""
 
-    # Pattern estesi per catturare quantità, consumi, volumi, litri, kWh, ecc.
-    patterns = [
-        r"(?:consum[oi]|quantit[aà]|q\.t[aà]|litri|totale|prelevata|erogata|volume|fatturat[oa])[\s\S]{0,40}?([\d\.,]+)\s*([a-zA-Z€%]{1,6})?",
+    # Cerchiamo prima pattern strutturati vicini a parole chiave di consumo/quantità
+    # Esempio: "consumo 4.829 kWh" oppure "totale kwh 4829"
+    pattern_mirati = [
+        r"(?:consum[oi]|totale|prelevata|energia attiva|quantit[aà]|q\.t[aà]|litri|volume|fatturat[oa])[\s\S]{0,40}?([\d\.,]+)\s*(kwh|litri|lt|l|sm3|m3|mc|kg)?",
         r"([\d\.,]+)\s*(kwh|litri|lt|l|sm3|m3|mc|kg)"
     ]
 
-    for pat in patterns:
+    candidati = []
+    for pat in pattern_mirati:
         matches = re.findall(pat, testo_p1_lower)
         if matches:
             for match in matches:
                 val_str = match[0] if isinstance(match, tuple) else match
                 unit_str = match[1] if isinstance(match, tuple) and len(match) > 1 else ""
                 
+                # Pulizia formato numerico italiano (es. 4.829 o 4.829,00 -> 4829.0)
                 val_clean = val_str.replace('.', '').replace(',', '.')
                 try:
                     num = float(val_clean)
-                    if num > 0:
-                        quantita = num
-                        if unit_str and unit_str not in ['eur', '€', '%', 'iva', 'di']:
-                            unita_misura = unit_str.upper()
-                        break
+                    # Filtriamo numeri troppo piccoli (es. date, civici) o codici fiscali/partite iva troppo lunghi
+                    if 0.5 < num < 1000000:
+                        candidati.append((num, unit_str.upper()))
                 except:
                     continue
-            if quantita > 0:
-                break
 
-    # Se l'unità non è esplicita sulla prima pagina, diamo un'impostazione di default logica
+    if candidati:
+        # Se troviamo candidati mirati, prendiamo il primo sensato o il più alto legato a unità note
+        for num, unit in candidati:
+            if unit: # Priorità a chi ha l'unità esplicita (es. kWh)
+                quantita = num
+                unita_misura = unit
+                break
+        if quantita == 0.0 and candidati:
+            # Fallback sul primo numero valido trovato vicino alle keyword
+            quantita = candidati[0][0]
+            unita_misura = candidati[0][1]
+
+    # Se l'unità non è stata intercettata ma la categoria è nota, diamo un'unità di default coerente
     if not unita_misura:
         if categoria == 'energia_elettrica':
             unita_misura = "kWh"
         elif categoria == 'trasporti':
             unita_misura = "Litri"
 
-    # 3. Specifico per Trasporti: Rilevamento Gasolio vs Benzina
+    # --- 3. SPECIFICO PER TRASPORTI (GASOLIO / BENZINA) ---
     tipo_carburante = ""
     if categoria == 'trasporti':
         if any(w in testo_tot_lower for w in ['gasolio', 'diesel', 'f.o.', 'gas.']):
@@ -146,7 +157,7 @@ def estrai_dati_locale(percorso_file, categoria, q):
     return risultato
 
 # ==========================================
-# 3. INTERFACCIA WEB (DASHBOARD AGGIORNATA)
+# 3. INTERFACCIA WEB (DASHBOARD)
 # ==========================================
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -186,7 +197,7 @@ HTML_PAGE = """
 <body>
     <div class="container">
         <div class="box">
-            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Analisi Prima Pagina & Estrazione Pura</small></h2>
+            <h2>Motore ESG <br><small style="font-size: 0.5em; color: #666;">Analisi Prima Pagina & Algoritmo Ottimizzato</small></h2>
             
             <label>Nome Azienda/Cliente (senza spazi):</label>
             <input type="text" id="nome_cliente" placeholder="es. ditta_rossi" required>
@@ -303,7 +314,7 @@ def avvia_processo():
         </head>
         <body>
             <div class="box">
-                <h2>Elaborazione {categoria.replace('_', ' ').title()} <br><small style="color:#666; font-size:0.6em;">Analisi Mirata Prima Pagina</small></h2>
+                <h2>Elaborazione {categoria.replace('_', ' ').title()} <br><small style="color:#666; font-size:0.6em;">Algoritmo Ottimizzato Prima Pagina</small></h2>
                 <div id="log-box"></div>
                 <div id="result-area"></div>
             </div>
