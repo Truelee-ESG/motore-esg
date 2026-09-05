@@ -46,7 +46,6 @@ def analizza_file_trasporti(cartella):
                 if filename.lower().endswith(valid_extensions):
                     file_list.append((root_dir, filename))
                     
-    # Fallback se non trova sottocartelle specifiche
     if not file_list:
         for root_dir, _, files in os.walk(cartella):
             for filename in files:
@@ -212,7 +211,7 @@ def _process_trasporti():
 
     file_list = analizza_file_trasporti(cartella)
     if not file_list:
-        messagebox.showwarning("Attenzione", "Nessuna cartella trovata con nomi compatibili (gasolio, benzina, mezzi, auto, automezzi, trasporti) o nessun file all'interno.")
+        messagebox.showwarning("Attenzione", "Nessun file valido trovato nelle cartelle di trasporto.")
         return
 
     total_files = len(file_list)
@@ -251,41 +250,66 @@ def _process_trasporti():
             if ext.endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
                     if len(pdf.pages) > 0:
-                        text = pdf.pages[0].extract_text() or ""
+                        page = pdf.pages[0]
+                        text = page.extract_text() or ""
+                        if text:
+                            text_lower = text.lower()
+                            periodo, anno = estrai_mesi_e_anno(text, text_lower)
+
+                            # Identificazione tipo carburante
+                            if "benzina" in text_lower:
+                                carburante = "Benzina"
+                            elif any(k in text_lower for k in ["gasolio", "diesel", "carbur"]):
+                                carburante = "Diesel"
+
+                            # Estrazione analitica basata su parole chiave (quantita, litri, L, kg)
+                            try:
+                                words = page.extract_words(extra_attrs=["size"])
+                                candidates = []
+                                for i, word in enumerate(words):
+                                    w_text = word['text']
+                                    # Cerca unità di misura target
+                                    if re.match(r'^(?:L|l|litri|Litri|litro|kg|KG|kilogrammi)$', w_text):
+                                        for j in range(max(0, i-3), i):
+                                            prev_word = words[j]['text']
+                                            clean_prev = prev_word.replace('.', '').replace(',', '.')
+                                            if re.match(r'^\d+[\.,]?\d*$', clean_prev):
+                                                detected_unit = "Litri" if "l" in w_text.lower() else "kg"
+                                                candidates.append({
+                                                    'valore': prev_word,
+                                                    'unita': detected_unit,
+                                                    'size': words[j].get('size', 0)
+                                                })
+                                if candidates:
+                                    candidates.sort(key=lambda x: x['size'], reverse=True)
+                                    quantita = candidates[0]['valore']
+                                    unita_misura = candidates[0]['unita']
+                                else:
+                                    # Fallback Regex generale sul testo
+                                    match_qty = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text)
+                                    if match_qty:
+                                        quantita = match_qty.group(1)
+                                        unita_misura = "kg" if "kg" in match_qty.group(0).lower() else "Litri"
+                            except Exception:
+                                match_qty = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text)
+                                if match_qty:
+                                    quantita = match_qty.group(1)
+                                    unita_misura = "kg" if "kg" in match_qty.group(0).lower() else "Litri"
+
             elif ext.endswith(('.jpg', '.jpeg', '.png')):
                 text = pytesseract.image_to_string(Image.open(file_path)) or ""
-
-            if text:
-                text_lower = text.lower()
-                folder_name = os.path.basename(root_dir).lower()
-                combined_text = f"{folder_name} {text_lower}"
-
-                # Ricerca tipo carburante
-                if "benzina" in combined_text:
-                    carburante = "Benzina"
-                elif any(k in combined_text for k in ["gasolio", "diesel", "carbur"]):
-                    carburante = "Diesel"
-
-                periodo, anno = estrai_mesi_e_anno(text, text_lower)
-
-                # Ricerca quantità e unità di misura (es. litri, L, kg, KG)
-                match_qty_unit = re.search(r'(\d{1,3}(?:\.\d{3})*[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG|kilogrammi)', text)
-                if match_qty_unit:
-                    quantita = match_qty_unit.group(1)
-                    u_raw = match_qty_unit.group(0).lower()
-                    if "kg" in u_raw or "kilogrammi" in u_raw:
-                        unita_misura = "kg"
-                    else:
-                        unita_misura = "Litri"
-                else:
-                    # Cerca etichetta quantità / q.tà / q,tà
-                    match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,30}(\d{1,3}(?:\.\d{3})*[\.,]?\d*)', text_lower)
-                    if match_label:
-                        quantita = match_label.group(1)
-                        if any(u in text_lower for u in ["kg", "kilogrammi"]):
-                            unita_misura = "kg"
-                        else:
-                            unita_misura = "Litri"
+                if text:
+                    text_lower = text.lower()
+                    periodo, anno = estrai_mesi_e_anno(text, text_lower)
+                    if "benzina" in text_lower:
+                        carburante = "Benzina"
+                    elif any(k in text_lower for k in ["gasolio", "diesel", "carbur"]):
+                        carburante = "Diesel"
+                    
+                    match_qty = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text)
+                    if match_qty:
+                        quantita = match_qty.group(1)
+                        unita_misura = "kg" if "kg" in match_qty.group(0).lower() else "Litri"
 
             row_idx = ws.max_row + 1
             ws.append([azienda, filename, periodo, anno, quantita, unita_misura, carburante])
