@@ -82,45 +82,6 @@ def estrai_mesi_e_anno(text, text_lower, filename=""):
         
     return periodo, anno
 
-def estrai_dati_trasporto_avanzato(page, text, text_lower):
-    quantita = "Non rilevato"
-    unita_misura = "Non rilevato"
-    
-    try:
-        words = page.extract_words(extra_attrs=["size"])
-        # Cerca etichette di quantità
-        for i, word in enumerate(words):
-            w_text = word['text'].lower()
-            if any(k in w_text for k in ['quantità', 'quantita', 'q.tà', 'q,tà', 'qta', 'um', 'u.m.']):
-                # Analizza le parole vicine (a destra o sotto nella lettura geometrica)
-                for j in range(i + 1, min(len(words), i + 8)):
-                    candidate_word = words[j]['text']
-                    clean_c = candidate_word.replace('.', '').replace(',', '.')
-                    if re.match(r'^\d+[\.,]?\d*$', clean_c) and quantita == "Non rilevato":
-                        quantita = candidate_word
-                    elif any(u in candidate_word.lower() for u in ['l', 'litri', 'litro', 'kg', 'kg.', 'kilogrammi']):
-                        u_low = candidate_word.lower()
-                        if 'kg' in u_low or 'kilogrammi' in u_low:
-                            unita_misura = "kg"
-                        else:
-                            unita_misura = "Litri"
-    except Exception:
-        pass
-
-    # Fallback tramite Regex strutturata sul testo se l'analisi geometrica non basta
-    if quantita == "Non rilevato":
-        match_q = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,20}(\d{1,3}(?:\.\d{3})*[\.,]?\d*)', text_lower)
-        if match_q:
-            quantita = match_q.group(1)
-
-    if unita_misura == "Non rilevato":
-        if re.search(r'\b(?:litri|litro|\bL\b)\b', text_lower):
-            unita_misura = "Litri"
-        elif re.search(r'\b(?:kg|kilogrammi)\b', text_lower):
-            unita_misura = "kg"
-
-    return quantita, unita_misura
-
 def avvia_energia_elettrica():
     threading.Thread(target=_process_energia_elettrica, daemon=True).start()
 
@@ -298,7 +259,37 @@ def _process_trasporti():
                         elif any(k in combined_check for k in ["gasolio", "diesel", "carbur"]):
                             carburante = "Diesel"
 
-                        quantita, unita_misura = estrai_dati_trasporto_avanzato(page, text, text_lower)
+                        # Applicazione esatta dell'algoritmo geometrico strutturato (mirroring di energia elettrica)
+                        try:
+                            words = page.extract_words(extra_attrs=["size"])
+                            candidates = []
+                            for i, word in enumerate(words):
+                                w_text = word['text'].lower()
+                                if re.match(r'^(?:l|litri|litro|kg|u\.m\.|um)$', w_text):
+                                    for j in range(max(0, i-3), i):
+                                        prev_word = words[j]['text']
+                                        clean_prev = prev_word.replace('.', '').replace(',', '.')
+                                        if re.match(r'^\d+[\.,]?\d*$', clean_prev):
+                                            detected_u = "kg" if "kg" in w_text else "Litri"
+                                            candidates.append({
+                                                'valore': prev_word,
+                                                'unita': detected_u,
+                                                'size': words[j].get('size', 0)
+                                            })
+                            if candidates:
+                                candidates.sort(key=lambda x: x['size'], reverse=True)
+                                quantita = candidates[0]['valore']
+                                unita_misura = candidates[0]['unita']
+                            else:
+                                match_fallback = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text, re.IGNORECASE)
+                                if match_fallback:
+                                    quantita = match_fallback.group(1)
+                                    unita_misura = "kg" if "kg" in match_fallback.group(0).lower() else "Litri"
+                        except Exception:
+                            match_fallback = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text, re.IGNORECASE)
+                            if match_fallback:
+                                quantita = match_fallback.group(1)
+                                unita_misura = "kg" if "kg" in match_fallback.group(0).lower() else "Litri"
 
             elif ext.endswith(('.jpg', '.jpeg', '.png')):
                 text = pytesseract.image_to_string(Image.open(file_path)) or ""
@@ -311,7 +302,7 @@ def _process_trasporti():
                 elif any(k in combined_check for k in ["gasolio", "diesel", "carbur"]):
                     carburante = "Diesel"
 
-                match_qty = re.search(r'(\d{1,3}(?:\.\d{3})*[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text, re.IGNORECASE)
+                match_qty = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text, re.IGNORECASE)
                 if match_qty:
                     quantita = match_qty.group(1)
                     unita_misura = "kg" if "kg" in match_qty.group(0).lower() else "Litri"
