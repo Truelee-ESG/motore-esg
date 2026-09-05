@@ -34,21 +34,21 @@ def analizza_file_trasporti(cartella):
         return None
     
     valid_extensions = ('.pdf', '.jpg', '.jpeg', '.png')
-    # Parole chiave aggiornate per identificare le cartelle dei trasporti/carburante
-    target_keywords = ['gasolio', 'benzina', 'mezzi', 'auto', 'trasporti', 'carburante', 'fleet', 'veicoli']
+    # Parole chiave mirate al NOME DELLE CARTELLE come richiesto
+    target_folder_keywords = ['gasolio', 'benzina', 'mezzi', 'auto', 'trasporti', 'carburante', 'fleet', 'veicoli']
     
     file_list = []
     for root_dir, _, files in os.walk(cartella):
-        path_lower = root_dir.lower()
-        # Controlla se una delle cartelle nel percorso contiene le parole chiave
-        is_target_dir = any(kw in path_lower for kw in target_keywords)
+        folder_name = os.path.basename(root_dir).lower()
+        # Verifica se il nome della cartella contiene una delle parole chiave
+        is_target_dir = any(kw in folder_name for kw in target_folder_keywords)
         
-        for filename in files:
-            if filename.lower().endswith(valid_extensions):
-                if is_target_dir or any(kw in filename.lower() for kw in target_keywords):
+        if is_target_dir:
+            for filename in files:
+                if filename.lower().endswith(valid_extensions):
                     file_list.append((root_dir, filename))
                     
-    # Se non trova corrispondenze mirate nelle sottocartelle, fa il fallback su tutti i file della root
+    # Fallback: se non trova cartelle con quei nomi specifici, cerca ovunque
     if not file_list:
         for root_dir, _, files in os.walk(cartella):
             for filename in files:
@@ -254,9 +254,10 @@ def _process_trasporti():
 
             if text:
                 text_lower = text.lower()
-                combined_text = f"{root_dir} {text_lower}"
+                folder_name = os.path.basename(root_dir).lower()
+                combined_text = f"{folder_name} {text_lower}"
                 
-                # Identificazione tipo carburante
+                # Determinazione carburante basata su nome cartella o contenuto fattura
                 if "benzina" in combined_text:
                     carburante = "Benzina"
                 elif any(k in combined_text for k in ["gasolio", "diesel", "carbur"]):
@@ -264,7 +265,7 @@ def _process_trasporti():
 
                 periodo, anno = estrai_mesi_e_anno(text, text_lower)
 
-                # Logica ottimizzata per intercettare quantità come 2.500,00 seguita da L o vicina a 'quantità'
+                # Estrazione ottimizzata per formato fattura (es. 2.500,00 L oppure vicino a quantità)
                 match_qty_unit = re.search(r'(\d{1,3}(?:\.\d{3})*[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|mc|MC|Smc|SMC|smc)', text)
                 if match_qty_unit:
                     raw_q = match_qty_unit.group(1)
@@ -275,7 +276,6 @@ def _process_trasporti():
                     else:
                         unita_misura = "Litri"
                 else:
-                    # Ricerca basata su etichette esplicite come Quantità / q.tà / q,tà / UM vicina a L o mc
                     match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,30}(\d{1,3}(?:\.\d{3})*[\.,]?\d*)', text_lower)
                     if match_label:
                         raw_q = match_label.group(1)
@@ -297,7 +297,6 @@ def _process_trasporti():
         progress_trans.config(value=idx)
         lbl_status_trans.config(text=f"Controllati: {idx} / {total_files} (Validi: {valid_count})")
 
-    # Modifica fondamentale: se valid_count è 0, genera comunque il file Excel vuoto con le intestazioni anziché bloccare tutto con un messagebox bloccante, assicurando il completamento del flusso.
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     out_path = os.path.join(desktop, f"Consumi_Trasporti_{azienda.replace(' ', '_')}.xlsx")
     wb.save(out_path)
