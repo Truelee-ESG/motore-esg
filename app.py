@@ -237,12 +237,12 @@ def _process_trasporti():
         ext = filename.lower()
         
         quantita = "Non rilevato"
-        unita_misura = "Non rilevato"
+        unita_misura = "Litri"
         carburante = "Non rilevato"
         periodo = "Non rilevato"
         anno = "Non rilevato"
         text = ""
-
+        
         try:
             if ext.endswith('.pdf'):
                 with pdfplumber.open(file_path) as pdf:
@@ -250,53 +250,51 @@ def _process_trasporti():
                         page = pdf.pages[0]
                         text = page.extract_text() or ""
                         text_lower = text.lower()
-                        
                         periodo, anno = estrai_mesi_e_anno(text, text_lower, filename)
-
-                        combined_check = f"{root_dir.lower()} {text_lower}"
+                        
+                        combined_check = f"{root_dir.lower()} {text_lower} {filename.lower()}"
                         if "benzina" in combined_check:
                             carburante = "Benzina"
                         elif any(k in combined_check for k in ["gasolio", "diesel", "carbur"]):
                             carburante = "Diesel"
 
-                        # Applicazione esatta dell'algoritmo geometrico strutturato (mirroring di energia elettrica)
                         try:
                             words = page.extract_words(extra_attrs=["size"])
                             candidates = []
                             for i, word in enumerate(words):
-                                w_text = word['text'].lower()
-                                if re.match(r'^(?:l|litri|litro|kg|u\.m\.|um)$', w_text):
+                                w_text = word['text']
+                                if re.match(r'^(?:L|l|litri|Litri|litro|kg|KG|u\.m\.|um)$', w_text, re.IGNORECASE):
+                                    if "kg" in w_text.lower():
+                                        unita_misura = "kg"
                                     for j in range(max(0, i-3), i):
                                         prev_word = words[j]['text']
                                         clean_prev = prev_word.replace('.', '').replace(',', '.')
                                         if re.match(r'^\d+[\.,]?\d*$', clean_prev):
-                                            detected_u = "kg" if "kg" in w_text else "Litri"
                                             candidates.append({
                                                 'valore': prev_word,
-                                                'unita': detected_u,
                                                 'size': words[j].get('size', 0)
                                             })
                             if candidates:
                                 candidates.sort(key=lambda x: x['size'], reverse=True)
                                 quantita = candidates[0]['valore']
-                                unita_misura = candidates[0]['unita']
                             else:
                                 match_fallback = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text, re.IGNORECASE)
                                 if match_fallback:
                                     quantita = match_fallback.group(1)
-                                    unita_misura = "kg" if "kg" in match_fallback.group(0).lower() else "Litri"
+                                    if "kg" in match_fallback.group(0).lower():
+                                        unita_misura = "kg"
                         except Exception:
                             match_fallback = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text, re.IGNORECASE)
                             if match_fallback:
                                 quantita = match_fallback.group(1)
-                                unita_misura = "kg" if "kg" in match_fallback.group(0).lower() else "Litri"
-
+                                if "kg" in match_fallback.group(0).lower():
+                                    unita_misura = "kg"
             elif ext.endswith(('.jpg', '.jpeg', '.png')):
                 text = pytesseract.image_to_string(Image.open(file_path)) or ""
                 text_lower = text.lower()
                 periodo, anno = estrai_mesi_e_anno(text, text_lower, filename)
                 
-                combined_check = f"{root_dir.lower()} {text_lower}"
+                combined_check = f"{root_dir.lower()} {text_lower} {filename.lower()}"
                 if "benzina" in combined_check:
                     carburante = "Benzina"
                 elif any(k in combined_check for k in ["gasolio", "diesel", "carbur"]):
@@ -305,19 +303,18 @@ def _process_trasporti():
                 match_qty = re.search(r'(\d+[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG)', text, re.IGNORECASE)
                 if match_qty:
                     quantita = match_qty.group(1)
-                    unita_misura = "kg" if "kg" in match_qty.group(0).lower() else "Litri"
+                    if "kg" in match_qty.group(0).lower():
+                        unita_misura = "kg"
 
             row_idx = ws.max_row + 1
             ws.append([azienda, filename, periodo, anno, quantita, unita_misura, carburante])
-            
             cell_file = ws.cell(row=row_idx, column=2)
             cell_file.hyperlink = abs_path
             cell_file.font = Font(color="0563C1", underline="single")
-            
             valid_count += 1
         except Exception:
             row_idx = ws.max_row + 1
-            ws.append([azienda, filename, "-", "-", "Non rilevato", "Non rilevato", "Non rilevato"])
+            ws.append([azienda, filename, "-", "-", "Non rilevato", "Litri", "Non rilevato"])
             cell_file = ws.cell(row=row_idx, column=2)
             cell_file.hyperlink = abs_path
             cell_file.font = Font(color="0563C1", underline="single")
