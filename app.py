@@ -39,10 +39,16 @@ def analizza_file_trasporti(cartella):
     file_list = []
     for root_dir, _, files in os.walk(cartella):
         folder_name = os.path.basename(root_dir).lower()
-        # Verifica rigorosa sul nome della cartella o se il percorso include le parole chiave
         is_target_dir = any(kw in folder_name or kw in root_dir.lower() for kw in target_folder_keywords)
         
         if is_target_dir:
+            for filename in files:
+                if filename.lower().endswith(valid_extensions):
+                    file_list.append((root_dir, filename))
+                    
+    # Fallback se non trova sottocartelle specifiche
+    if not file_list:
+        for root_dir, _, files in os.walk(cartella):
             for filename in files:
                 if filename.lower().endswith(valid_extensions):
                     file_list.append((root_dir, filename))
@@ -216,7 +222,7 @@ def _process_trasporti():
     ws = wb.active
     ws.title = "Trasporti Carburante"
     
-    ws.append([f"Elenco fatture carburante - {datetime.now().strftime('%d/%m/%Y %H:%M')}"])
+    ws.append([f"Estrazione dati fatture carburante - {datetime.now().strftime('%d/%m/%Y %H:%M')}"])
     ws.cell(row=1, column=1).font = Font(size=12, bold=True, color="2E7D32")
     ws.append([])
     
@@ -232,17 +238,73 @@ def _process_trasporti():
     for idx, (root_dir, filename) in enumerate(file_list, 1):
         file_path = os.path.join(root_dir, filename)
         abs_path = os.path.abspath(file_path)
+        ext = filename.lower()
         
-        row_idx = ws.max_row + 1
-        ws.append([azienda, filename, "-", "-", "-", "-", "-"])
-        
-        cell_file = ws.cell(row=row_idx, column=2)
-        cell_file.hyperlink = abs_path
-        cell_file.font = Font(color="0563C1", underline="single")
-        
-        valid_count += 1
+        quantita = "Non rilevato"
+        unita_misura = "Non rilevato"
+        carburante = "Non rilevato"
+        periodo = "Non rilevato"
+        anno = "Non rilevato"
+        text = ""
+
+        try:
+            if ext.endswith('.pdf'):
+                with pdfplumber.open(file_path) as pdf:
+                    if len(pdf.pages) > 0:
+                        text = pdf.pages[0].extract_text() or ""
+            elif ext.endswith(('.jpg', '.jpeg', '.png')):
+                text = pytesseract.image_to_string(Image.open(file_path)) or ""
+
+            if text:
+                text_lower = text.lower()
+                folder_name = os.path.basename(root_dir).lower()
+                combined_text = f"{folder_name} {text_lower}"
+
+                # Ricerca tipo carburante
+                if "benzina" in combined_text:
+                    carburante = "Benzina"
+                elif any(k in combined_text for k in ["gasolio", "diesel", "carbur"]):
+                    carburante = "Diesel"
+
+                periodo, anno = estrai_mesi_e_anno(text, text_lower)
+
+                # Ricerca quantità e unità di misura (es. litri, L, kg, KG)
+                match_qty_unit = re.search(r'(\d{1,3}(?:\.\d{3})*[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG|kilogrammi)', text)
+                if match_qty_unit:
+                    quantita = match_qty_unit.group(1)
+                    u_raw = match_qty_unit.group(0).lower()
+                    if "kg" in u_raw or "kilogrammi" in u_raw:
+                        unita_misura = "kg"
+                    else:
+                        unita_misura = "Litri"
+                else:
+                    # Cerca etichetta quantità / q.tà / q,tà
+                    match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,30}(\d{1,3}(?:\.\d{3})*[\.,]?\d*)', text_lower)
+                    if match_label:
+                        quantita = match_label.group(1)
+                        if any(u in text_lower for u in ["kg", "kilogrammi"]):
+                            unita_misura = "kg"
+                        else:
+                            unita_misura = "Litri"
+
+            row_idx = ws.max_row + 1
+            ws.append([azienda, filename, periodo, anno, quantita, unita_misura, carburante])
+            
+            cell_file = ws.cell(row=row_idx, column=2)
+            cell_file.hyperlink = abs_path
+            cell_file.font = Font(color="0563C1", underline="single")
+            
+            valid_count += 1
+        except Exception:
+            row_idx = ws.max_row + 1
+            ws.append([azienda, filename, "-", "-", "Non rilevato", "Non rilevato", "Non rilevato"])
+            cell_file = ws.cell(row=row_idx, column=2)
+            cell_file.hyperlink = abs_path
+            cell_file.font = Font(color="0563C1", underline="single")
+            valid_count += 1
+
         progress_trans.config(value=idx)
-        lbl_status_trans.config(text=f"Trovati: {idx} / {total_files}")
+        lbl_status_trans.config(text=f"Processati: {idx} / {total_files}")
 
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     out_path = os.path.join(desktop, f"Consumi_Trasporti_{azienda.replace(' ', '_')}.xlsx")
@@ -306,7 +368,7 @@ card_trans = tk.Frame(frame_cards, bg="#ffffff", highlightbackground="#cbd5e1", 
 card_trans.pack(side="right", fill="both", expand=True, padx=(10, 0))
 
 tk.Label(card_trans, text="Ambiente - Trasporti", font=(FONT_FAMILY, 12, "bold"), bg="#ffffff", fg="#2e7d32").pack(pady=(16, 6))
-tk.Label(card_trans, text="Estrai link fatture da\ncartelle carburante/mezzi.", font=(FONT_FAMILY, 9), bg="#ffffff", fg="#64748b", justify="center").pack(pady=(0, 12))
+tk.Label(card_trans, text="Estrai litri e tipo carburante\n(gasolio/benzina).", font=(FONT_FAMILY, 9), bg="#ffffff", fg="#64748b", justify="center").pack(pady=(0, 12))
 
 btn_trans = tk.Button(card_trans, text="Avvia Trasporti", command=avvia_trasporti, bg="#2e7d32", fg="white", font=(FONT_FAMILY, 10, "bold"), relief="flat", cursor="hand2", pady=8, padx=12)
 btn_trans.pack(pady=(0, 12))
