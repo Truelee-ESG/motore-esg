@@ -66,7 +66,6 @@ def estrai_mesi_e_anno(text, text_lower, filename=""):
     anno = "Non rilevato"
     periodo = "Non rilevato"
     
-    # Cerca l'anno nel testo o nel nome file
     source_to_check = f"{filename} {text}"
     years = re.findall(r'\b(20\d{2})\b', source_to_check)
     if years:
@@ -82,6 +81,45 @@ def estrai_mesi_e_anno(text, text_lower, filename=""):
         periodo = found_mesi[0] if len(found_mesi) == 1 else f"{found_mesi[0]} - {found_mesi[-1]}"
         
     return periodo, anno
+
+def estrai_dati_trasporto_avanzato(page, text, text_lower):
+    quantita = "Non rilevato"
+    unita_misura = "Non rilevato"
+    
+    try:
+        words = page.extract_words(extra_attrs=["size"])
+        # Cerca etichette di quantità
+        for i, word in enumerate(words):
+            w_text = word['text'].lower()
+            if any(k in w_text for k in ['quantità', 'quantita', 'q.tà', 'q,tà', 'qta', 'um', 'u.m.']):
+                # Analizza le parole vicine (a destra o sotto nella lettura geometrica)
+                for j in range(i + 1, min(len(words), i + 8)):
+                    candidate_word = words[j]['text']
+                    clean_c = candidate_word.replace('.', '').replace(',', '.')
+                    if re.match(r'^\d+[\.,]?\d*$', clean_c) and quantita == "Non rilevato":
+                        quantita = candidate_word
+                    elif any(u in candidate_word.lower() for u in ['l', 'litri', 'litro', 'kg', 'kg.', 'kilogrammi']):
+                        u_low = candidate_word.lower()
+                        if 'kg' in u_low or 'kilogrammi' in u_low:
+                            unita_misura = "kg"
+                        else:
+                            unita_misura = "Litri"
+    except Exception:
+        pass
+
+    # Fallback tramite Regex strutturata sul testo se l'analisi geometrica non basta
+    if quantita == "Non rilevato":
+        match_q = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,20}(\d{1,3}(?:\.\d{3})*[\.,]?\d*)', text_lower)
+        if match_q:
+            quantita = match_q.group(1)
+
+    if unita_misura == "Non rilevato":
+        if re.search(r'\b(?:litri|litro|\bL\b)\b', text_lower):
+            unita_misura = "Litri"
+        elif re.search(r'\b(?:kg|kilogrammi)\b', text_lower):
+            unita_misura = "kg"
+
+    return quantita, unita_misura
 
 def avvia_energia_elettrica():
     threading.Thread(target=_process_energia_elettrica, daemon=True).start()
@@ -252,34 +290,15 @@ def _process_trasporti():
                         text = page.extract_text() or ""
                         text_lower = text.lower()
                         
-                        # Estrazione periodo e anno (inclusi nel testo o nel nome file)
                         periodo, anno = estrai_mesi_e_anno(text, text_lower, filename)
 
-                        # Ricerca tipo carburante nel testo o nel percorso cartella
                         combined_check = f"{root_dir.lower()} {text_lower}"
                         if "benzina" in combined_check:
                             carburante = "Benzina"
                         elif any(k in combined_check for k in ["gasolio", "diesel", "carbur"]):
                             carburante = "Diesel"
 
-                        # Estrazione robusta della quantità associata a litri / L / KG
-                        match_qty = re.search(r'(\d{1,3}(?:\.\d{3})*[\.,]?\d*)\s*(?:litri|Litri|L\b|litro|kg|KG|kilogrammi)', text, re.IGNORECASE)
-                        if match_qty:
-                            quantita = match_qty.group(1)
-                            u_str = match_qty.group(0).lower()
-                            if "kg" in u_str or "kilogrammi" in u_str:
-                                unita_misura = "kg"
-                            else:
-                                unita_misura = "Litri"
-                        else:
-                            # Cerca etichetta esplicita o vicina a Quantità / q.tà
-                            match_label = re.search(r'(?:quantit[aà]|q[\.,]tà|qta)\D{0,25}(\d{1,3}(?:\.\d{3})*[\.,]?\d*)', text_lower)
-                            if match_label:
-                                quantita = match_label.group(1)
-                                if any(u in text_lower for u in ["kg", "kilogrammi"]):
-                                    unita_misura = "kg"
-                                else:
-                                    unita_misura = "Litri"
+                        quantita, unita_misura = estrai_dati_trasporto_avanzato(page, text, text_lower)
 
             elif ext.endswith(('.jpg', '.jpeg', '.png')):
                 text = pytesseract.image_to_string(Image.open(file_path)) or ""
