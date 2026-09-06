@@ -1,6 +1,6 @@
-pdfplumber
-openpyxl
+PyMuPDF
+requests
 pyinstaller
-Pillow
+pandas
+openpyxl
 pytesseract
-
